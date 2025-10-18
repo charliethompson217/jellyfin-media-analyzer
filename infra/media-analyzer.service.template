@@ -1,0 +1,14 @@
+[Unit]
+Description=Media Analyzer Flask Backend
+After=network.target
+
+[Service]
+User=${SERVICE_USER}
+WorkingDirectory=${BACKEND_DIR}
+Environment="PATH=${BACKEND_DIR}/venv/bin"
+ExecStart=${BACKEND_DIR}/venv/bin/gunicorn  --bind 127.0.0.1:${BACKEND_PORT} --timeout 300 app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

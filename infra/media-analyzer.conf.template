@@ -1,0 +1,69 @@
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl http2;
+    server_name ${SERVER_NAME};
+
+    ssl_certificate ${SSL_CERT_PATH};
+    ssl_certificate_key ${SSL_KEY_PATH};
+
+    auth_basic "Restricted Media";
+    auth_basic_user_file ${HTPASSWD_FILE};
+
+    location / {
+        root ${FRONTEND_DIR};
+        index index.html;
+        try_files $uri /index.html =404;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:${BACKEND_PORT};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location = /movies {
+        return 301 /movies/;
+    }
+
+    location /movies/ {
+        alias ${MOVIES_LIBRARY_DIR};
+        fancyindex on;
+        fancyindex_name_length 255;
+        fancyindex_ignore "\.nfo$" "\.jpg$" "\.png$" "\.trickplay$";
+
+        location ~* \.(nfo|jpg|png|trickplay)$ {
+            deny all;
+        }
+
+        limit_req zone=media_rl burst=50 nodelay;
+    }
+
+    location = /tv_shows {
+        return 301 /tv_shows/;
+    }
+
+    location /tv_shows/ {
+        alias ${TVSHOWS_LIBRARY_DIR};
+        fancyindex on;
+        fancyindex_name_length 255;
+        fancyindex_ignore "\.nfo$" "\.jpg$" "\.png$" "\.trickplay$";
+
+        location ~* \.(nfo|jpg|png|trickplay)$ {
+            deny all;
+        }
+
+        limit_req zone=media_rl burst=5 nodelay;
+    }
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${SERVER_NAME};
+    return 301 https://$host$request_uri;
+}
