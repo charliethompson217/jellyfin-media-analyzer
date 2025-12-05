@@ -67,75 +67,76 @@ def get_media():
     all_items = fetch_all_items(direct_params)
 
     data = []
-    seen_paths = set()  # Dedup by path
+    seen_paths = set()  # Dedup by full file path
     for item in all_items:
         if item.get('Type') == 'BoxSet':  # Skip any boxset that slips in
             continue
         if item.get('LocationType') != 'FileSystem':
             continue
-        path = item.get('Path', 'Unknown')
-        if path in seen_paths:
-            continue
-        seen_paths.add(path)
 
-        ms = item.get('MediaSources', [{}])[0]
-        container = ms.get('Container', 'Unknown')
-        size_mb = ms.get('Size', 0) / (1024 * 1024) if ms.get('Size') else 0
+        media_sources = item.get('MediaSources', [])
+        for ms in media_sources:
+            path = ms.get('Path', 'Unknown')
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
 
-        streams = item.get('MediaStreams', [])
-        video = next((s for s in streams if s.get('Type') == 'Video'), {})
-        video_codec = video.get('Codec', 'Unknown').upper()
-        resolution = f"{video.get('Width', '?')}x{video.get('Height', '?')}"
-        fps = round(video.get('RealFrameRate', 0), 2) if video.get('RealFrameRate') else 'Unknown'
-        hdr = video.get('VideoRangeType', 'SDR')
-        color_gamut = video.get('ColorPrimaries', 'Unknown')
+            container = ms.get('Container', 'Unknown')
+            size_mb = ms.get('Size', 0) / (1024 * 1024) if ms.get('Size') else 0
 
-        audio = [s for s in streams if s.get('Type') == 'Audio']
-        audio_codec = ', '.join(set(a.get('Codec', 'Unknown').upper() for a in audio)) if audio else 'None'
-        audio_channels = max((a.get('Channels', 0) for a in audio), default=0)
-        audio_bitrate_kbps = sum(a.get('BitRate', 0) for a in audio) / 1000 if audio else 0
-        audio_sample = audio[0].get('SampleRate', 'Unknown') if audio else 'None'
-        audio_tracks = len(audio)
+            streams = ms.get('MediaStreams', [])
+            video = next((s for s in streams if s.get('Type') == 'Video'), {})
+            video_codec = video.get('Codec', 'Unknown').upper()
+            resolution = f"{video.get('Width', '?')}x{video.get('Height', '?')}"
+            fps = round(video.get('RealFrameRate', 0), 2) if video.get('RealFrameRate') else 'Unknown'
+            hdr = video.get('VideoRangeType', 'SDR')
+            color_gamut = video.get('ColorPrimaries', 'Unknown')
 
-        video_bitrate_kbps = video.get('BitRate', 0) / 1000 if video.get('BitRate') else 0
+            audio = [s for s in streams if s.get('Type') == 'Audio']
+            audio_codec = ', '.join(set(a.get('Codec', 'Unknown').upper() for a in audio)) if audio else 'None'
+            audio_channels = max((a.get('Channels', 0) for a in audio), default=0)
+            audio_bitrate_kbps = sum(a.get('BitRate', 0) for a in audio) / 1000 if audio else 0
+            audio_sample = audio[0].get('SampleRate', 'Unknown') if audio else 'None'
+            audio_tracks = len(audio)
 
-        duration_ticks = item.get('RunTimeTicks', 0)
-        duration_sec = duration_ticks / 10000000
-        duration_min = duration_sec / 60 if duration_sec else 0
+            video_bitrate_kbps = video.get('BitRate', 0) / 1000 if video.get('BitRate') else 0
 
-        scan_type = 'Progressive' if video.get('IsInterlaced') is False else 'Interlaced' if video.get('IsInterlaced') else 'Unknown'
+            duration_ticks = item.get('RunTimeTicks', 0)
+            duration_sec = duration_ticks / 10000000
+            duration_min = duration_sec / 60 if duration_sec else 0
 
-        efficiency = size_mb / (duration_min / 60) if duration_min > 0 else 0  # MiB/hour
+            scan_type = 'Progressive' if video.get('IsInterlaced') is False else 'Interlaced' if video.get('IsInterlaced') else 'Unknown'
 
-        item_type = item.get('Type', 'Unknown')
-        # Treat 'Video' as 'Movie'
-        if item_type == 'Video':
-            item_type = 'Movie'
+            efficiency = size_mb / (duration_min / 60) if duration_min > 0 else 0  # MiB/hour
 
-        data.append({
-            'name': item.get('Name', 'Unknown'),
-            'type': item_type,
-            'series_name': item.get('SeriesName', '') if item_type == 'Episode' else '',
-            'season_name': item.get('SeasonName', '') if item_type == 'Episode' else '',
-            'episode_number': item.get('IndexNumber', None) if item_type == 'Episode' else None,
-            'path': path,
-            'container': container,
-            'video_codec': video_codec,
-            'video_bitrate_kbps': round(video_bitrate_kbps),
-            'frame_rate': fps,
-            'hdr_info': hdr,
-            'color_gamut': color_gamut,
-            'scan_type': scan_type,
-            'audio_codec': audio_codec,
-            'audio_bitrate_kbps': round(audio_bitrate_kbps),
-            'audio_sample_rate': audio_sample,
-            'audio_channels': audio_channels,
-            'audio_track_count': audio_tracks,
-            'resolution': resolution,
-            'duration_min': round(duration_min, 2),
-            'size_mb': round(size_mb, 2),
-            'efficiency_mb_per_hour': round(efficiency, 2)
-        })
+            item_type = item.get('Type', 'Unknown')
+            if item_type == 'Video':
+                item_type = 'Movie'
+
+            data.append({
+                'name': item.get('Name', 'Unknown'),
+                'type': item_type,
+                'series_name': item.get('SeriesName', '') if item_type == 'Episode' else '',
+                'season_name': item.get('SeasonName', '') if item_type == 'Episode' else '',
+                'episode_number': item.get('IndexNumber', None) if item_type == 'Episode' else None,
+                'path': path,
+                'container': container,
+                'video_codec': video_codec,
+                'video_bitrate_kbps': round(video_bitrate_kbps),
+                'frame_rate': fps,
+                'hdr_info': hdr,
+                'color_gamut': color_gamut,
+                'scan_type': scan_type,
+                'audio_codec': audio_codec,
+                'audio_bitrate_kbps': round(audio_bitrate_kbps),
+                'audio_sample_rate': audio_sample,
+                'audio_channels': audio_channels,
+                'audio_track_count': audio_tracks,
+                'resolution': resolution,
+                'duration_min': round(duration_min, 2),
+                'size_mb': round(size_mb, 2),
+                'efficiency_mb_per_hour': round(efficiency, 2)
+            })
 
     # Cache this for next time
     try:

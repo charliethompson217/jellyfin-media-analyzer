@@ -38,9 +38,167 @@ export default function Charts({ data, mode = 'count' }) {
     { key: 'audio_channels', title: 'Audio Channels', sorted: true },
     { key: 'color_gamut', title: 'Color Gamuts' },
   ];
+  
+  const buildBitrateHistogram = () => {
+    const numBins = 100;
+    
+    const bitrates = [];
+    data.forEach(item => {
+      if (!item.size_mb || !item.duration_min || item.duration_min === 0) return;
+      const bitrateMbps = (item.size_mb * 8) / (item.duration_min * 60);
+      bitrates.push({ bitrateMbps, size_mb: item.size_mb, duration_min: item.duration_min });
+    });
+    
+    if (bitrates.length === 0) {
+      return { labels: [], counts: [], sizes: [], durations: [], binSize: 0 };
+    }
+    
+    const maxBitrate = Math.max(...bitrates.map(b => b.bitrateMbps));
+    const binSize = maxBitrate / numBins;
+    
+    const bins = [];
+    for (let i = 0; i < numBins; i++) {
+      const binStart = i * binSize;
+      const binEnd = binStart + binSize;
+      bins.push({ count: 0, size: 0, duration: 0, binStart, binEnd });
+    }
+    
+    bitrates.forEach(({ bitrateMbps, size_mb, duration_min }) => {
+      let binIndex = Math.floor(bitrateMbps / binSize);
+      if (binIndex >= numBins) binIndex = numBins - 1;
+      
+      bins[binIndex].count++;
+      bins[binIndex].size += size_mb || 0;
+      bins[binIndex].duration += duration_min || 0;
+    });
+    
+    return {
+      labels: bins.map(bin => bin.binStart.toFixed(1)),
+      counts: bins.map(bin => bin.count),
+      sizes: bins.map(bin => bin.size),
+      durations: bins.map(bin => bin.duration),
+      binSize,
+      maxBitrate,
+    };
+  };
+  
+  const bitrateHistogram = buildBitrateHistogram();
+  const bitrateBinSize = bitrateHistogram.binSize || 1;
+  const bitrateDataValues = mode === 'size' 
+    ? bitrateHistogram.sizes 
+    : mode === 'duration' 
+      ? bitrateHistogram.durations 
+      : bitrateHistogram.counts;
+  
+  const bitrateChartData = {
+    labels: bitrateHistogram.labels,
+    datasets: [{
+      label: mode === 'size' ? 'Total Size (MB)' : mode === 'duration' ? 'Total Duration (min)' : 'Count',
+      data: bitrateDataValues,
+      backgroundColor: 'rgba(59, 130, 246, 0.7)',
+      borderColor: 'rgba(59, 130, 246, 1)',
+      borderWidth: 1,
+      barPercentage: 1.0,
+      categoryPercentage: 1.0,
+    }],
+  };
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+    <>
+      {/* Bitrate Histogram - Full Width */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+        <Bar
+          data={bitrateChartData}
+          options={{
+            responsive: true,
+            maintainAspectRatio: true,
+            aspectRatio: 3,
+            plugins: {
+              title: {
+                display: true,
+                text: 'Bitrate Distribution (Mbps)',
+                font: { size: 16, weight: 'bold' },
+                color: '#111827'
+              },
+              legend: {
+                display: false
+              },
+              tooltip: {
+                callbacks: {
+                  title: (context) => {
+                    const label = context[0].label;
+                    const binStart = parseFloat(label);
+                    const binEnd = binStart + bitrateBinSize;
+                    return `${binStart.toFixed(1)}-${binEnd.toFixed(1)} Mbps`;
+                  },
+                  label: (context) => {
+                    const value = context.parsed.y;
+                    if (mode === 'size') {
+                      return `Total Size: ${formatSize(value)}`;
+                    } else if (mode === 'duration') {
+                      return `Total Duration: ${formatDuration(value)}`;
+                    }
+                    return `Count: ${value}`;
+                  }
+                }
+              }
+            },
+            scales: {
+              x: {
+                title: {
+                  display: true,
+                  text: 'Bitrate (Mbps)',
+                  font: { size: 12 },
+                  color: '#6B7280'
+                },
+                ticks: {
+                  maxRotation: 0,
+                  autoSkip: true,
+                  maxTicksLimit: 10,
+                  callback: function(value, index) {
+                    const label = this.getLabelForValue(index);
+                    return parseFloat(label).toFixed(0);
+                  }
+                }
+              },
+              y: {
+                beginAtZero: true,
+                ticks: {
+                  precision: mode === 'count' ? 0 : 2,
+                  callback: function(value) {
+                    if (mode === 'size') {
+                      if (value >= 1024) {
+                        return (value / 1024).toFixed(1) + ' GiB';
+                      }
+                      return value.toFixed(0) + ' MiB';
+                    } else if (mode === 'duration') {
+                      const hours = value / 60;
+                      const days = hours / 24;
+                      if (days >= 1) {
+                        return days.toFixed(1) + ' days';
+                      }
+                      if (hours >= 1) {
+                        return hours.toFixed(1) + ' hrs';
+                      }
+                      return value.toFixed(0) + ' min';
+                    }
+                    return value;
+                  }
+                },
+                title: {
+                  display: true,
+                  text: mode === 'size' ? 'Total Size' : mode === 'duration' ? 'Total Duration' : 'Number of Files',
+                  font: { size: 12 },
+                  color: '#6B7280'
+                }
+              }
+            }
+          }}
+        />
+      </div>
+      
+      {/* Other Charts Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
       {chartConfigs.map(config => {
         let values;
         let sortedKeys = null;
@@ -274,6 +432,7 @@ export default function Charts({ data, mode = 'count' }) {
           </div>
         );
       })}
-    </div>
+      </div>
+    </>
   );
 }

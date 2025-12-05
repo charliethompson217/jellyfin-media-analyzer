@@ -1,5 +1,38 @@
 import { useReactTable, getCoreRowModel, getPaginationRowModel, getSortedRowModel, flexRender } from '@tanstack/react-table';
 
+function exportToCSV(table, columns) {
+  const headers = columns.map(col => col.header);
+  const accessorKeys = columns.map(col => col.accessorKey);
+  
+  const rows = table.getSortedRowModel().rows;
+  
+  const csvRows = [
+    headers.join(','),
+    ...rows.map(row => 
+      accessorKeys.map(key => {
+        const value = row.original[key];
+        if (value == null) return '';
+        const stringValue = String(value);
+        if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+          return `"${stringValue.replace(/"/g, '""')}"`;
+        }
+        return stringValue;
+      }).join(',')
+    )
+  ];
+  
+  const csvContent = csvRows.join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', `media-export-${new Date().toISOString().split('T')[0]}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 export default function MediaTable({ data, hiddenColumns }) {
   const columns = [
     { accessorKey: 'name', header: 'Name' },
@@ -95,10 +128,21 @@ export default function MediaTable({ data, hiddenColumns }) {
             Next
           </button>
         </div>
-        <span className="text-sm text-gray-700">
-          Page <span className="font-semibold">{table.getState().pagination.pageIndex + 1}</span> of{' '}
-          <span className="font-semibold">{table.getPageCount()}</span>
-        </span>
+        <div className="flex items-center gap-4">
+          <span className="text-sm text-gray-700">
+            Page <span className="font-semibold">{table.getState().pagination.pageIndex + 1}</span> of{' '}
+            <span className="font-semibold">{table.getPageCount()}</span>
+          </span>
+          <button
+            onClick={() => exportToCSV(table, columns)}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-blue-600 rounded-md hover:bg-blue-700 transition-colors flex items-center gap-2"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Export CSV
+          </button>
+        </div>
       </div>
     </div>
   );
