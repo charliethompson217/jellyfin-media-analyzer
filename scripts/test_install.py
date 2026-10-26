@@ -23,6 +23,11 @@ with (root / 'events.jsonl').open('a') as log:
 if name == 'nginx':
     if '-T' in args: print('include /etc/nginx/sites-enabled/*;')
     if '-t' in args and os.environ.get('FAIL_NGINX_TEST') == '1': sys.exit(1)
+    if '-t' in args:
+        config = (root / 'nginx/sites-available/media-analyzer.conf').read_text()
+        if re.search(r'^\s*fancyindex\b', config, re.M) and os.environ.get('FANCYINDEX_AVAILABLE') != '1':
+            print('unknown directive "fancyindex"', file=sys.stderr)
+            sys.exit(1)
 elif name == 'curl':
     sys.exit(1 if os.environ.get('FAIL_HEALTH') == '1' else 0)
 elif name == 'systemctl':
@@ -150,12 +155,29 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((self.root / 'units/media-analyzer.service').read_text(), 'old service')
         self.assertEqual(self.password.read_text(), 'other:preserved-hash\nweb:old-hash\n')
 
+    def service_commands(self):
+        events = self.root / 'events.jsonl'
+        if not events.exists():
+            return []
+        return [args for name, args in (json.loads(line) for line in events.read_text().splitlines())
+                if name == 'systemctl']
+
+    def configure_fancyindex(self, value):
+        with (self.repo / '.env').open('a') as handle:
+            handle.write('ENABLE_FANCYINDEX=' + shlex.quote(value) + '\n')
+
     def test_success_migrates_directory_install_preserves_users_and_safely_serializes_key(self):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.backend.is_symlink())
         self.assertTrue(self.frontend.is_symlink())
         self.assertEqual((self.frontend / 'index.html').read_text(), 'new frontend')
+        nginx = self.config.read_text()
+        self.assertNotIn('fancyindex', nginx)
+        self.assertNotIn('${MEDIA_INDEX_DIRECTIVES}', nginx)
+        self.assertEqual(nginx.count('autoindex on;'), 2)
+        self.assertEqual(nginx.count('deny all;'), 2)
+        self.assertIn('auth_basic "Restricted Media";', nginx)
         config = ast.parse((self.backend / 'config.py').read_text())
         settings = {node.targets[0].id: ast.literal_eval(node.value) for node in config.body}
         self.assertEqual(settings['API_KEY'], self.secret)
@@ -163,6 +185,42 @@ class InstallerTests(unittest.TestCase):
         # A second update must also work when deployment paths are symlinks.
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fancyindex_can_be_enabled_when_module_is_available(self):
+        self.configure_fancyindex('true')
+        result = self.run_installer(FANCYINDEX_AVAILABLE='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        nginx = self.config.read_text()
+        self.assertEqual(nginx.count('fancyindex on;'), 2)
+        self.assertEqual(nginx.count('fancyindex_name_length 255;'), 2)
+        self.assertEqual(nginx.count('fancyindex_ignore'), 2)
+        self.assertEqual(nginx.count('autoindex off;'), 2)
+        self.assertNotIn('autoindex on;', nginx)
+
+    def test_explicit_false_works_without_the_module(self):
+        self.configure_fancyindex('false')
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('fancyindex', self.config.read_text())
+        self.assertEqual(self.config.read_text().count('autoindex on;'), 2)
+
+    def test_missing_fancyindex_module_rolls_back_without_stopping_the_old_backend(self):
+        self.configure_fancyindex('true')
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unknown directive "fancyindex"', result.stderr)
+        self.assert_restored()
+        self.assertFalse(self.backend.is_symlink())
+        self.assertNotIn(['stop', 'media-analyzer.service'], self.service_commands())
+        self.assertNotIn(['restart', 'media-analyzer.service'], self.service_commands())
+
+    def test_invalid_fancyindex_value_fails_before_changing_the_deployment(self):
+        self.configure_fancyindex('maybe')
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ENABLE_FANCYINDEX must be true or false.', result.stderr)
+        self.assert_restored()
+        self.assertEqual(self.service_commands(), [])
 
     def test_build_failure_leaves_live_directories_untouched(self):
         self.assertNotEqual(self.run_installer(FAIL_BUILD='1').returncode, 0)
@@ -181,10 +239,13 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(self.run_installer(FAIL_NGINX_TEST='1').returncode, 0)
         self.assert_restored()
         self.assertFalse(self.backend.is_symlink())
+        self.assertNotIn(['stop', 'media-analyzer.service'], self.service_commands())
+        self.assertNotIn(['restart', 'media-analyzer.service'], self.service_commands())
 
     def test_backend_health_failure_restores_previous_release(self):
         self.assertNotEqual(self.run_installer(FAIL_HEALTH='1').returncode, 0)
         self.assert_restored()
+        self.assertEqual(self.service_commands().count(['restart', 'media-analyzer.service']), 2)
 
     def test_nginx_reload_failure_restores_previous_release(self):
         self.assertNotEqual(self.run_installer(FAIL_RELOAD='1').returncode, 0)

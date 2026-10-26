@@ -13,6 +13,24 @@ required=(JELLYFIN_URL JELLYFIN_API_KEY BACKEND_DIR SERVER_NAME SSL_CERT_PATH SS
 for name in "${required[@]}"; do
     [[ -n ${!name:-} ]] || { echo "Missing configuration: $name" >&2; exit 1; }
 done
+ENABLE_FANCYINDEX=${ENABLE_FANCYINDEX:-false}
+case "$ENABLE_FANCYINDEX" in
+    true)
+        MEDIA_INDEX_DIRECTIVES='autoindex off;
+        fancyindex on;
+        fancyindex_name_length 255;
+        fancyindex_ignore "\.nfo$" "\.jpg$" "\.png$" "\.trickplay$";'
+        ;;
+    false)
+        MEDIA_INDEX_DIRECTIVES='autoindex on;
+        autoindex_exact_size off;'
+        ;;
+    *)
+        echo 'ENABLE_FANCYINDEX must be true or false.' >&2
+        exit 1
+        ;;
+esac
+export MEDIA_INDEX_DIRECTIVES
 for command in python3 npm nginx systemctl htpasswd envsubst runuser curl useradd getent realpath; do
     command -v "$command" >/dev/null || { echo "Missing prerequisite: $command" >&2; exit 1; }
 done
@@ -70,6 +88,7 @@ OLD_FRONTEND=''
 CONFIG_CHANGED=false
 BACKEND_CHANGED=false
 FRONTEND_CHANGED=false
+BACKEND_RESTARTED=false
 
 backup_file() {
     if [[ -e $1 || -L $1 ]]; then cp -a -- "$1" "$BACKUP_DIR/$2"; fi
@@ -103,7 +122,9 @@ finish() {
             restore_file "$SERVICE_FILE" service
             restore_file "$HTPASSWD_FILE" htpasswd
             systemctl daemon-reload
-            if [[ -n $OLD_BACKEND ]]; then systemctl restart media-analyzer.service; else systemctl stop media-analyzer.service; fi
+            if $BACKEND_RESTARTED; then
+                if [[ -n $OLD_BACKEND ]]; then systemctl restart media-analyzer.service; else systemctl stop media-analyzer.service; fi
+            fi
             if nginx -t; then systemctl reload nginx; fi
         fi
     fi
@@ -181,7 +202,7 @@ backup_file "$SERVICE_FILE" service
 backup_file "$HTPASSWD_FILE" htpasswd
 CONFIG_CHANGED=true
 install -m 640 -o root -g "$NGINX_GROUP" "$BACKUP_DIR/staged-htpasswd" "$HTPASSWD_FILE"
-envsubst '${SERVER_NAME} ${SSL_CERT_PATH} ${SSL_KEY_PATH} ${HTPASSWD_FILE} ${FRONTEND_DIR} ${BACKEND_PORT} ${MOVIES_LIBRARY_DIR} ${TVSHOWS_LIBRARY_DIR}' < "$REPO_DIR/infra/media-analyzer.conf.template" > "$NGINX_CONFIG"
+envsubst '${SERVER_NAME} ${SSL_CERT_PATH} ${SSL_KEY_PATH} ${HTPASSWD_FILE} ${FRONTEND_DIR} ${BACKEND_PORT} ${MOVIES_LIBRARY_DIR} ${TVSHOWS_LIBRARY_DIR} ${MEDIA_INDEX_DIRECTIVES}' < "$REPO_DIR/infra/media-analyzer.conf.template" > "$NGINX_CONFIG"
 ln -sfn -- "$NGINX_CONFIG" "$NGINX_LINK"
 envsubst '${SERVICE_USER} ${BACKEND_DIR} ${BACKEND_PORT}' < "$REPO_DIR/infra/media-analyzer.service.template" > "$SERVICE_FILE"
 # Validate candidate config while the running app and Nginx are still untouched.
@@ -202,6 +223,7 @@ fi
 FRONTEND_CHANGED=true
 point_release "$FRONTEND_DIR" "$FRONTEND_RELEASE"
 systemctl daemon-reload
+BACKEND_RESTARTED=true
 systemctl restart media-analyzer.service
 healthy=false
 for attempt in {1..20}; do

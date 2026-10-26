@@ -4,14 +4,14 @@ A Flask/React application for inspecting the files and versions in a Jellyfin li
 
 ## Requirements
 
-- Production: Linux with systemd, Python 3.12+, Node 22.12+ (or Node 20.19+), npm, Nginx with Fancyindex, `envsubst` (gettext), `htpasswd`, `curl`, and `runuser`.
+- Production: Linux with systemd, Python 3.12+, Node 22.12+ (or Node 20.19+), npm, Nginx, `envsubst` (gettext), `htpasswd`, `curl`, and `runuser`. Fancyindex is optional.
 - A running Jellyfin server and an API key with permission to list the intended media.
 - An SSL certificate/key and Nginx access to the media directories.
 
 ## Install or update
 
 1. Copy `.env.example` to `.env` and set the server, credentials, directories, service account, and Nginx account/group. This is a shell configuration file; quote values containing spaces or shell characters. Never commit it.
-2. Configure Nginx to load Fancyindex and include `/etc/nginx/sites-enabled/*` inside its `http` block. [infra/nginx.conf.example](infra/nginx.conf.example) shows the structure. The site defines its own rate-limit zone. The existing Nginx configuration must pass `nginx -t` before installation.
+2. Configure Nginx to include `/etc/nginx/sites-enabled/*` inside its `http` block. [infra/nginx.conf.example](infra/nginx.conf.example) shows the structure. The site defines its own rate-limit zone. Directory listings use Nginx's built-in autoindex by default. Set `ENABLE_FANCYINDEX=true` only if the Fancyindex module is installed and loaded in Nginx. The existing Nginx configuration must pass `nginx -t` before installation.
 3. Run `sudo ./scripts/install.sh` from any directory. Back up custom server configuration before the first upgrade.
 4. Check `systemctl status media-analyzer`, `journalctl -u media-analyzer -f`, and your HTTPS site. The local health check is `http://127.0.0.1:5000/api/health` (adjust for `BACKEND_PORT`).
 
@@ -31,6 +31,7 @@ Environment variables take precedence over optional `backend/config.py` settings
 - `SCAN_TIMEOUT`: scan deadline in seconds, default/max 240 for the supplied production proxy/worker timeouts.
 - `MOVIES_LIBRARY_DIR`, `TVSHOWS_LIBRARY_DIR`: local directories served by Nginx in production and Flask in development.
 - `JELLYFIN_MOVIES_DIR`, `JELLYFIN_TVSHOWS_DIR`: optional corresponding paths returned by Jellyfin, if it runs inside a container or uses different mount points. They default to the local library paths.
+- `ENABLE_FANCYINDEX`: `false` (default) uses built-in directory listings without requiring the Fancyindex module. Set `true` to render Fancyindex directives; install/load the module first. Both modes preserve media aliases, authentication, and the existing sidecar access restrictions. Basic listings can show sidecar names even though those files remain inaccessible.
 
 Only recognized library paths become download links; filenames are URL-encoded, and unmapped/unknown paths remain text. Nginx provides HTTPS Basic Auth for the site, API, and downloads. The backend is deliberately bound to loopback and has no independent login; keep it behind that proxy in production.
 

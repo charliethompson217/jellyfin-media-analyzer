@@ -4,7 +4,8 @@ worker_processes  1;
 
 include modules.d/*.conf;
 
-load_module /usr/lib/nginx/modules/ngx_http_fancyindex_module.so; 
+# Optional: install/load this module only when ENABLE_FANCYINDEX=true.
+# load_module /usr/lib/nginx/modules/ngx_http_fancyindex_module.so;
 
 events {
     worker_connections  1024;

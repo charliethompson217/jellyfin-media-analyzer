@@ -34,9 +34,7 @@ server {
 
     location /movies/ {
         alias "${MOVIES_LIBRARY_DIR}/";
-        fancyindex on;
-        fancyindex_name_length 255;
-        fancyindex_ignore "\.nfo$" "\.jpg$" "\.png$" "\.trickplay$";
+        ${MEDIA_INDEX_DIRECTIVES}
 
         location ~* \.(nfo|jpg|png|trickplay)$ {
             deny all;
@@ -51,9 +49,7 @@ server {
 
     location /tv_shows/ {
         alias "${TVSHOWS_LIBRARY_DIR}/";
-        fancyindex on;
-        fancyindex_name_length 255;
-        fancyindex_ignore "\.nfo$" "\.jpg$" "\.png$" "\.trickplay$";
+        ${MEDIA_INDEX_DIRECTIVES}
 
         location ~* \.(nfo|jpg|png|trickplay)$ {
             deny all;
