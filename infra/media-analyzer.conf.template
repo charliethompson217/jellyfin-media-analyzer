@@ -1,16 +1,18 @@
+limit_req_zone $binary_remote_addr zone=media_analyzer_rl:10m rate=10r/s;
+
 server {
     listen 443 ssl;
     listen [::]:443 ssl http2;
     server_name ${SERVER_NAME};
 
-    ssl_certificate ${SSL_CERT_PATH};
-    ssl_certificate_key ${SSL_KEY_PATH};
+    ssl_certificate "${SSL_CERT_PATH}";
+    ssl_certificate_key "${SSL_KEY_PATH}";
 
     auth_basic "Restricted Media";
-    auth_basic_user_file ${HTPASSWD_FILE};
+    auth_basic_user_file "${HTPASSWD_FILE}";
 
     location / {
-        root ${FRONTEND_DIR};
+        root "${FRONTEND_DIR}";
         index index.html;
         try_files $uri /index.html =404;
     }
@@ -31,7 +33,7 @@ server {
     }
 
     location /movies/ {
-        alias ${MOVIES_LIBRARY_DIR};
+        alias "${MOVIES_LIBRARY_DIR}/";
         fancyindex on;
         fancyindex_name_length 255;
         fancyindex_ignore "\.nfo$" "\.jpg$" "\.png$" "\.trickplay$";
@@ -40,7 +42,7 @@ server {
             deny all;
         }
 
-        limit_req zone=media_rl burst=50 nodelay;
+        limit_req zone=media_analyzer_rl burst=50 nodelay;
     }
 
     location = /tv_shows {
@@ -48,7 +50,7 @@ server {
     }
 
     location /tv_shows/ {
-        alias ${TVSHOWS_LIBRARY_DIR};
+        alias "${TVSHOWS_LIBRARY_DIR}/";
         fancyindex on;
         fancyindex_name_length 255;
         fancyindex_ignore "\.nfo$" "\.jpg$" "\.png$" "\.trickplay$";
@@ -57,7 +59,7 @@ server {
             deny all;
         }
 
-        limit_req zone=media_rl burst=5 nodelay;
+        limit_req zone=media_analyzer_rl burst=5 nodelay;
     }
 }
 

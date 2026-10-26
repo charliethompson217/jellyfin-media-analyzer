@@ -1,83 +1,85 @@
 # Media Analyzer
 
-A fullstack app for displaying video file information such as codec, resolution, framerate, etc for all your jellyfin media.
+A Flask/React application for inspecting the files and versions in a Jellyfin library: codecs, resolution, frame rates, HDR, audio, storage, duration, charts, and CSV export.
 
-## Prerequisites
+## Requirements
 
-- Linux server (I use Arch btw).
-- Git, Python 3.12+, Node.js 20+, npm, Nginx, systemd.
-- apache2-utils (for htpasswd).
-- mkcert for self-signed SSL (gen certs manual: `mkcert ${SERVER_NAME}`).
-- Jellyfin server running with API key.
-- Sudo for install (dirs like /etc/, /opt/).
+- Production: Linux with systemd, Python 3.12+, Node 22.12+ (or Node 20.19+), npm, Nginx with Fancyindex, `envsubst` (gettext), `htpasswd`, `curl`, and `runuser`.
+- A running Jellyfin server and an API key with permission to list the intended media.
+- An SSL certificate/key and Nginx access to the media directories.
 
-## Installation
+## Install or update
 
-1. Clone repo: `git clone repo-url && cd media-analyzer`.
+1. Copy `.env.example` to `.env` and set the server, credentials, directories, service account, and Nginx account/group. This is a shell configuration file; quote values containing spaces or shell characters. Never commit it.
+2. Configure Nginx to load Fancyindex and include `/etc/nginx/sites-enabled/*` inside its `http` block. [infra/nginx.conf.example](infra/nginx.conf.example) shows the structure. The site defines its own rate-limit zone. The existing Nginx configuration must pass `nginx -t` before installation.
+3. Run `sudo ./scripts/install.sh` from any directory. Back up custom server configuration before the first upgrade.
+4. Check `systemctl status media-analyzer`, `journalctl -u media-analyzer -f`, and your HTTPS site. The local health check is `http://127.0.0.1:5000/api/health` (adjust for `BACKEND_PORT`).
 
-2. Copy `.env.example` to `.env` and fill your secrets/values (don't commit .env):
-   ```
-   JELLYFIN_URL=https://your-jellyfin.example
-   JELLYFIN_API_KEY=your-secret-key
-   BACKEND_DIR=/opt/media-analyzer
-   SERVER_NAME=media-analyzer.local
-   SSL_CERT_PATH=/etc/ssl/media-analyzer/media-analyzer.local.pem
-   SSL_KEY_PATH=/etc/ssl/media-analyzer/media-analyzer.local-key.pem
-   FRONTEND_DIR=/srv/http/media-analyzer
-   BACKEND_PORT=5000
-   MOVIES_LIBRARY_DIR=/path/to/movies
-   TVSHOWS_LIBRARY_DIR=/path/to/tvshows
-   SERVICE_USER=media-analyzer  # System user for backend—script creates if missing
-   NGINX_USER=http  # Nginx runs as this user (e.g., http on Arch)
-   NGINX_GROUP=http  # Nginx group
-   HTPASSWD_FILE=/etc/nginx/media-analyzer.htpasswd
-   HT_USERNAME=your-web-user
-   HT_PASSWORD=your-web-password
-   ```
+The installer builds and tests as a non-root user without passing server credentials to dependency code. It stages immutable backend/frontend releases, validates Nginx before switching the running app, checks backend health, and restores the previous release/configuration if activation fails. Existing password-file users are preserved. Previous releases remain under `<BACKEND_DIR>.releases` and `<FRONTEND_DIR>.releases`; the configured app directories become symlinks. Existing directory installs are retained as `legacy-*` releases on first migration.
 
-3. Run install: `sudo ./scripts/install.sh`.
-   - Copies/renders templates to system paths.
-   - Sets up venv, installs deps.
-   - Builds/copies frontend dist.
-   - Creates .htpasswd for basic auth.
-   - Starts/enables systemd service.
-   - Reloads Nginx.
+`CACHE_FILE` must be an absolute path outside both app directories, such as `/opt/media-analyzer.state/cache.json`. Only that state directory is writable by the service. Avoid placing unrelated files in it. Keep deployment directories separate and dedicated to this app. The installer is intended for GNU/Linux; macOS is supported for local application development, not system deployment.
 
-4. Verify:
-   - `systemctl status media-analyzer` (backend).
-   - `journalctl -u media-analyzer -f` (logs).
-   - `nginx -t && curl -u $HT_USERNAME:$HT_PASSWORD https://${SERVER_NAME}` (frontend).
-   - API: `curl -u $HT_USERNAME:$HT_PASSWORD https://${SERVER_NAME}/api/media`.
+The installer does not edit Nginx's main configuration or install missing OS packages. Certificate/key and media directories must already exist. Failed builds leave the current application untouched; failed activations restore the previous app/configuration. Staged release directories are retained for diagnosis and can be removed after verifying they are not an active/previous release.
 
-5. Update: Git pull, re-run install.sh (overwrites configs safely).
+## Configuration and downloads
 
-**Warnings**: Backup /etc/nginx/* first if customizing.
+Environment variables take precedence over optional `backend/config.py` settings. For local file configuration, copy `backend/config.py.template` to `backend/config.py` and fill the values. The installer generates the production file with restricted permissions.
 
-## Development Setup
+- `JELLYFIN_URL`, `JELLYFIN_API_KEY`: server URL and key. Both modern and legacy authentication use headers, with no key in URL parameters. Redirects are rejected; use the final server URL.
+- `JELLYFIN_USER_ID`: blank for a server-wide inventory; set an ID for an explicit user scope. The app no longer chooses whichever user happens to appear first.
+- `CACHE_FILE`, `CACHE_MAX_AGE`: snapshot location and freshness in seconds (default 3600). Legacy caches are rescanned automatically. Cache identity includes server/scope/configuration, so changing them requires a fresh scan.
+- `SCAN_TIMEOUT`: scan deadline in seconds, default/max 240 for the supplied production proxy/worker timeouts.
+- `MOVIES_LIBRARY_DIR`, `TVSHOWS_LIBRARY_DIR`: local directories served by Nginx in production and Flask in development.
+- `JELLYFIN_MOVIES_DIR`, `JELLYFIN_TVSHOWS_DIR`: optional corresponding paths returned by Jellyfin, if it runs inside a container or uses different mount points. They default to the local library paths.
 
-1. Clone as above.
+Only recognized library paths become download links; filenames are URL-encoded, and unmapped/unknown paths remain text. Nginx provides HTTPS Basic Auth for the site, API, and downloads. The backend is deliberately bound to loopback and has no independent login; keep it behind that proxy in production.
 
-2. **Backend**:
-   - `cd backend`.
-   - `python3 -m venv venv && source venv/bin/activate`.
-   - `pip install -r requirements.txt`.
-   - Copy config.py.template to config.py, fill JELLYFIN_URL/API_KEY (or use env: script renders, but manual for dev).
-   - Run: `flask run --port=5000` (or gunicorn for prod-like).
-   - Test: `curl http://localhost:5000/api/media`.
+An expired snapshot triggers a refresh. Other requests can use the last snapshot while that scan runs. A failed refresh preserves the snapshot and shows a safe warning. The UI displays the last successful scan time and skipped records. Unknown metadata remains unknown; unavailable size/runtime values do not participate in bitrate calculations. Each file/version is counted separately, and the storage-rate summary is the mean per file with known data.
 
-3. **Frontend**:
-   - `cd frontend`.
-   - `npm ci`.
-   - Add export: `VITE_PROXY_TARGET=http://localhost:5000` (proxies /api, /movies, /tv_shows to backend).
-   - Run: `npm run dev`.
-   - Open http://localhost:5173 (Vite default).
+## Development
 
-4. Full dev stack:
-   - Run backend first.
-   - Frontend proxies to it.
+From the repository root, create `.env` from `.env.example`, then load it into your shell with `set -a`, `source .env`, and `set +a`. For development, set a local writable `CACHE_FILE`, for example `/tmp/media-analyzer-dev/cache.json`. Alternatively use `backend/config.py` as described above.
 
-5. Build frontend: `npm run build` (outputs dist/).
+Backend:
 
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+cd backend
+../.venv/bin/flask --app app run --host 127.0.0.1 --port 5000
+```
+
+In a second terminal:
+
+```sh
+cd frontend
+npm ci --ignore-scripts
+npm run dev
+```
+
+Open the Vite URL (normally `http://localhost:5173`). API and media downloads are proxied to `http://localhost:5000`; set `VITE_PROXY_TARGET` for a different backend address. To download real media in development, the local library directories must be accessible to the backend, with Jellyfin-to-local mappings configured if needed. The API/frontend timeouts allow a scan to finish without the previous 30-second development proxy cutoff.
+
+## Checks
+
+From the repository root with backend requirements installed:
+
+```sh
+python -m unittest discover -s backend -v
+python -m unittest discover -s scripts -p 'test_*.py' -v
+bash -n scripts/install.sh
+```
+
+From `frontend`:
+
+```sh
+npm run lint
+npm test
+npm run build
+```
+
+GitHub Actions runs regression tests, lint, and the build. Backend tests use synthetic data and fake credentials, never a live Jellyfin server. Installer tests use an isolated filesystem and mock system commands; a real Linux/Nginx deployment rehearsal is still needed before relying on a new host configuration.
+
+The original [October 2026 audit](docs/audits/2026-10-26/README.md) and its characterization scripts record pre-fix behavior at commit `b971214`. Those historical scripts are not the current regression suite.
 
 ## License
 

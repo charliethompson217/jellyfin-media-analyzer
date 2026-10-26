@@ -1,4 +1,15 @@
-JELLYFIN_URL = "${JELLYFIN_URL}"
-API_KEY = "${JELLYFIN_API_KEY}"
-CACHE_FILE = "${BACKEND_DIR}/cache.json"
-PORT = ${BACKEND_PORT}
+# Optional local overrides. Environment variables take precedence.
+# The installer generates a complete config.py; it does not envsubst this file.
+from pathlib import Path
+
+JELLYFIN_URL = 'http://127.0.0.1:8096'
+API_KEY = ''
+CACHE_FILE = str(Path(__file__).with_name('cache.json'))
+PORT = 5000
+JELLYFIN_USER_ID = ''  # Empty scans the entire server; set an ID to restrict scope.
+CACHE_MAX_AGE = 3600
+SCAN_TIMEOUT = 240
+MOVIES_LIBRARY_DIR = ''  # Local directory available to Flask/Nginx.
+TVSHOWS_LIBRARY_DIR = ''
+JELLYFIN_MOVIES_DIR = ''  # Jellyfin's corresponding directory (e.g. inside a container).
+JELLYFIN_TVSHOWS_DIR = ''
