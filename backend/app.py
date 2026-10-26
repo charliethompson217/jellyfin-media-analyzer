@@ -8,6 +8,34 @@ from config import JELLYFIN_URL, API_KEY, CACHE_FILE, PORT
 app = Flask(__name__)
 CORS(app)
 
+JELLYFIN_HEADERS = {
+    'Authorization': f'MediaBrowser Token="{API_KEY}"'
+}
+
+LEGACY_JELLYFIN_HEADERS = {
+    'X-Emby-Token': API_KEY
+}
+
+def jellyfin_get(path, params=None):
+    """Call Jellyfin using v12 auth, with legacy auth as a compatibility fallback."""
+    request_params = params.copy() if params else {}
+    response = requests.get(
+        f'{JELLYFIN_URL}/{path}',
+        params=request_params,
+        headers=JELLYFIN_HEADERS
+    )
+
+    if response.status_code != 401:
+        return response
+
+    legacy_params = request_params.copy()
+    legacy_params['api_key'] = API_KEY
+    return requests.get(
+        f'{JELLYFIN_URL}/{path}',
+        params=legacy_params,
+        headers=LEGACY_JELLYFIN_HEADERS
+    )
+
 def fetch_all_items(base_params):
     """Fetch all items with paging"""
     all_items = []
@@ -18,7 +46,7 @@ def fetch_all_items(base_params):
         params['StartIndex'] = start_index
         params['Limit'] = limit
         try:
-            resp = requests.get(f'{JELLYFIN_URL}/Items', params=params)
+            resp = jellyfin_get('Items', params)
             resp.raise_for_status()
             result = resp.json()
             items = result['Items']
@@ -41,9 +69,8 @@ def get_media():
             return jsonify({'error': f'Cache read bombed: {str(e)}'}), 500
 
     # Grab user ID
-    user_params = {'api_key': API_KEY}
     try:
-        user_resp = requests.get(f'{JELLYFIN_URL}/Users', params=user_params)
+        user_resp = jellyfin_get('Users')
         user_resp.raise_for_status()
         users = user_resp.json()
         if not users:
@@ -61,8 +88,7 @@ def get_media():
         'IncludeItemTypes': 'Movie,Episode',
         'Recursive': True,
         'Fields': fields,
-        'CollapseBoxSetItems': 'false',
-        'api_key': API_KEY
+        'CollapseBoxSetItems': 'false'
     }
     all_items = fetch_all_items(direct_params)
 
