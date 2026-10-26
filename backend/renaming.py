@@ -3,8 +3,10 @@ from contextlib import contextmanager
 import copy
 import ctypes
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -23,6 +25,7 @@ SIDECAR_EXTENSIONS = {'.nfo', '.srt', '.ass', '.ssa', '.sub', '.idx', '.vtt', '.
 GENERIC_ASSET_RE = re.compile(r'^(?:(?:backdrop|fanart)\d*|folder|poster|landscape|logo|clearlogo|banner|thumb|disc|clearart)\.(?:jpg|jpeg|png|webp)$', re.I)
 STAGE_PREFIX = '.media-analyzer-rename-'
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+LOGGER = logging.getLogger(__name__)
 
 
 class RenameError(Exception):
@@ -109,6 +112,39 @@ def inventory(fd):
     return result
 
 
+def mergerfs_mount(root):
+    """Identify a real mergerfs mount; never trust a user-writable xattr alone."""
+    if sys.platform != 'linux':
+        return None
+    try:
+        lines = Path('/proc/self/mountinfo').read_text().splitlines()
+    except OSError:
+        return None
+    matches = []
+    for line in lines:
+        fields, separator, filesystem = line.partition(' - ')
+        if not separator or not filesystem.startswith('fuse.mergerfs '):
+            continue
+        parts = fields.split()
+        if len(parts) < 5:
+            continue
+        mount = Path(re.sub(r'\\([0-7]{3})', lambda match: chr(int(match.group(1), 8)), parts[4]))
+        if root.is_relative_to(mount):
+            matches.append(mount)
+    return max(matches, key=lambda path: len(path.parts), default=None)
+
+
+def mergerfs_paths(path):
+    try:
+        value = os.getxattr(path, 'user.mergerfs.allpaths', follow_symlinks=False)
+    except OSError:
+        raise RenameError('MergerFS could not report the physical branch paths. Check its xattr settings and folder access.') from None
+    paths = [Path(os.fsdecode(part)) for part in value.split(b'\0') if part]
+    if not paths or any(not path.is_absolute() or '..' in path.parts for path in paths):
+        raise RenameError('MergerFS returned an invalid physical branch path.')
+    return paths
+
+
 def rename_noreplace(source_fd, source, destination_fd, destination):
     """Atomic exclusion on Linux/macOS; never fall back to overwriting rename()."""
     libc = ctypes.CDLL(None, use_errno=True)
@@ -140,6 +176,26 @@ def atomic_json(destination, value):
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def rolled_back_message(error, phase, area):
+    """Explain a failed step without returning raw OS errors or server secrets."""
+    if isinstance(error, OSError) and phase == 'rename' and error.errno in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+        return 'This filesystem does not support the atomic no-overwrite rename operation. The rename was rolled back; check the filesystem or MergerFS branch mapping.'
+    if isinstance(error, PermissionError) and phase == 'rename':
+        location = 'movie library parent directory' if area == 'parent' else 'selected movie folder'
+        return f'The service account could not rename entries in the {location}. Check write/search permissions and ACLs there. The rename was rolled back.'
+    if isinstance(error, OSError) and error.errno == errno.EROFS:
+        return 'The movie library is read-only. The rename was rolled back.'
+    if phase == 'sync':
+        return 'The filesystem could not sync the directory changes. The rename was rolled back; check the filesystem and service logs.'
+    if phase == 'journal':
+        return 'The rename history could not be saved. The rename was rolled back; check the cache state directory and service logs.'
+    if phase == 'visibility':
+        return 'MergerFS did not show the renamed folder on exactly one branch. The rename was rolled back; check its branch configuration.'
+    if isinstance(error, FileExistsError):
+        return 'A destination appeared during the rename. The rename was rolled back; preview again.'
+    return 'The rename failed and was rolled back. Check filesystem permissions and service logs before retrying.'
 
 
 class MovieRenamer:
@@ -200,6 +256,33 @@ class MovieRenamer:
             raise RenameError('Select a movie inside its own folder; the movie library root cannot be renamed.', 400)
         return relative
 
+    def _operation_root(self, parent_parts, folder, logical_entries):
+        mount = mergerfs_mount(self.root)
+        if mount is None:
+            return self.root
+        try:
+            branches_value = os.getxattr(mount / '.mergerfs', 'user.mergerfs.branches')
+        except OSError:
+            raise RenameError('MergerFS branch configuration is unavailable. Check its xattr settings.') from None
+        branches = [Path(part.split('=', 1)[0]).resolve() for part in os.fsdecode(branches_value).rstrip('\0').split(':') if part]
+        relative_folder = self.root.relative_to(mount).joinpath(*parent_parts, folder)
+        logical_folder = self.root.joinpath(*parent_parts, folder)
+        locations = mergerfs_paths(logical_folder)
+        if len(locations) != 1:
+            raise RenameError('This movie folder spans multiple MergerFS branches. A whole-folder rename is blocked.')
+        physical_folder = locations[0]
+        branch = next((item for item in branches if physical_folder == item / relative_folder), None)
+        if branch is None:
+            raise RenameError('The movie folder is outside the configured MergerFS branches.')
+        operation_root = branch / self.root.relative_to(mount)
+        with open_directory(branch, self.root.relative_to(mount).parts):
+            pass
+        for entry in logical_entries:
+            locations = mergerfs_paths(logical_folder / entry['name'])
+            if locations != [physical_folder / entry['name']]:
+                raise RenameError('This movie folder has files on multiple MergerFS branches. A whole-folder rename is blocked.')
+        return operation_root
+
     def _plan(self, snapshot, row_id, prefix):
         row = next((item for item in snapshot['data'] if item['id'] == row_id and item.get('type') == 'Movie'), None)
         if row is None:
@@ -222,19 +305,19 @@ class MovieRenamer:
         prefix = validate_name(prefix if prefix is not None else suggestion or folder)
         with open_directory(self.root, parent_parts) as parent_fd:
             with open_directory(self.root, (*parent_parts, folder)) as folder_fd:
+                logical_entries = inventory(folder_fd)
+                self._check_target(parent_fd, folder_fd, folder, prefix)
+        operation_root = self._operation_root(parent_parts, folder, logical_entries)
+        with open_directory(operation_root, parent_parts) as parent_fd:
+            with open_directory(operation_root, (*parent_parts, folder)) as folder_fd:
                 folder_info = os.fstat(folder_fd)
                 entries = inventory(folder_fd)
+                if [entry['name'] for entry in entries] != [entry['name'] for entry in logical_entries]:
+                    raise RenameError('The MergerFS view differs from its physical branch. Refresh the library before renaming.')
                 limit = os.fpathconf(folder_fd, 'PC_NAME_MAX')
                 if len(os.fsencode(prefix)) > limit:
                     raise RenameError('The shared prefix exceeds the filesystem filename length limit.', 400)
-                try:
-                    target = lstat_at(parent_fd, prefix)
-                except FileNotFoundError:
-                    target = None
-                if prefix != folder and target is not None and file_identity(target) != file_identity(folder_info):
-                    raise RenameError('A different directory already uses that name. Nothing will be overwritten.')
-                if any(name != folder and name.casefold() == prefix.casefold() for name in os.listdir(parent_fd)):
-                    raise RenameError('A different directory already uses that name or a case variant. Nothing will be overwritten.')
+                self._check_target(parent_fd, folder_fd, folder, prefix)
                 entries_by_name = {entry['name']: entry for entry in entries}
                 for item in group:
                     name = PurePosixPath(item['path']).name
@@ -290,12 +373,26 @@ class MovieRenamer:
                     'scope': self.scope, 'row_id': row_id, 'snapshot_revision': revision(snapshot),
                     'prefix': prefix, 'suggested_prefix': suggestion, 'old_folder': folder,
                     'parent_parts': list(parent_parts), 'folder_identity': file_identity(folder_info),
+                    'operation_root': str(operation_root),
                     'inventory_digest': digest(entries), 'entries': changes, 'affected_media': affected,
                     'source_directory': str(self.root.joinpath(*parent_parts, folder)),
                     'destination_directory': str(self.root.joinpath(*parent_parts, prefix)),
                     'video_count': len(videos), 'changed_filenames': sum(change['renamed'] for change in changes),
                     'folder_changed': prefix != folder,
                 }
+
+    @staticmethod
+    def _check_target(parent_fd, folder_fd, folder, prefix):
+        if prefix != folder:
+            try:
+                target = lstat_at(parent_fd, prefix)
+            except FileNotFoundError:
+                pass
+            else:
+                if file_identity(target) != file_identity(os.fstat(folder_fd)):
+                    raise RenameError('A different directory already uses that name. Nothing will be overwritten.')
+        if any(name != folder and name.casefold() == prefix.casefold() for name in os.listdir(parent_fd)):
+            raise RenameError('A different directory already uses that name or a case variant. Nothing will be overwritten.')
 
     def preview(self, snapshot, row_id, prefix=None):
         self._check_pending()
@@ -328,8 +425,9 @@ class MovieRenamer:
         snapshot_copy = copy.deepcopy(snapshot)
         # Build the new snapshot before changing the filesystem.
         update_snapshot(snapshot_copy, plan['affected_media'], transaction)
-        with open_directory(self.root, plan['parent_parts']) as parent_fd:
-            with open_directory(self.root, (*plan['parent_parts'], plan['old_folder'])) as folder_fd:
+        operation_root = Path(plan['operation_root'])
+        with open_directory(operation_root, plan['parent_parts']) as parent_fd:
+            with open_directory(operation_root, (*plan['parent_parts'], plan['old_folder'])) as folder_fd:
                 if file_identity(os.fstat(folder_fd)) != plan['folder_identity'] or digest(inventory(folder_fd)) != plan['inventory_digest']:
                     raise RenameError('The source folder changed. Preview the rename again.')
                 operations = [('parent', plan['old_folder'], stage_folder, plan['folder_identity'])]
@@ -342,24 +440,51 @@ class MovieRenamer:
                         operations.append(('folder', f'{STAGE_PREFIX}{transaction}-{index}', item['new_name'], item['fingerprint'][:3]))
                 operations.append(('parent', stage_folder, plan['prefix'], plan['folder_identity']))
                 journal['operations'] = operations
-                atomic_json(journal_path, journal)
+                try:
+                    atomic_json(journal_path, journal)
+                except PermissionError:
+                    raise RenameError('The service account cannot write rename history in the cache state directory.', 403) from None
                 completed = []
+                phase, area = None, None
                 try:
                     for area, source, target, identity in operations:
                         fd = parent_fd if area == 'parent' else folder_fd
+                        phase = 'rename'
+                        if operation_root != self.root and area == 'parent' and source == stage_folder:
+                            with open_directory(self.root, plan['parent_parts']) as logical_parent_fd:
+                                if target != plan['old_folder']:
+                                    try:
+                                        lstat_at(logical_parent_fd, target)
+                                    except FileNotFoundError:
+                                        pass
+                                    else:
+                                        raise RenameError('A destination appeared in the MergerFS library during the rename.')
+                                if any(name not in (plan['old_folder'], stage_folder) and name.casefold() == target.casefold()
+                                       for name in os.listdir(logical_parent_fd)):
+                                    raise RenameError('A destination appeared in the MergerFS library during the rename.')
                         if file_identity(lstat_at(fd, source)) != identity:
                             raise RenameError('A source entry changed during the rename.')
                         rename_noreplace(fd, source, fd, target)
                         completed.append((area, source, target, identity))
                         if file_identity(lstat_at(fd, target)) != identity:
                             raise RenameError('A source entry changed during the rename.')
+                        phase = 'sync'
                         os.fsync(fd)
                         journal['completed_steps'] = len(completed)
+                        phase = 'journal'
                         atomic_json(journal_path, journal)
+                    if operation_root != self.root:
+                        phase = 'visibility'
+                        visible = self.root.joinpath(*plan['parent_parts'], plan['prefix'])
+                        physical = operation_root.joinpath(*plan['parent_parts'], plan['prefix'])
+                        if mergerfs_paths(visible) != [physical]:
+                            raise RenameError('MergerFS shows multiple physical locations for the renamed folder.')
                     journal['status'] = 'completed'
                     journal['revision'] = transaction
+                    phase = 'journal'
                     atomic_json(journal_path, journal)
-                except Exception:
+                except Exception as failure:
+                    failed_area = area
                     restored = True
                     for area, source, target, identity in reversed(completed):
                         fd = parent_fd if area == 'parent' else folder_fd
@@ -372,13 +497,18 @@ class MovieRenamer:
                             restored = False
                             break
                     journal['status'] = 'rolled_back' if restored else 'needs_recovery'
+                    journal['failure_stage'] = phase
+                    journal['failure_area'] = failed_area
+                    journal['failure_errno'] = getattr(failure, 'errno', None)
                     try:
                         atomic_json(journal_path, journal)
                     except OSError:
                         pass
+                    LOGGER.warning('Movie rename %s failed at %s/%s (errno=%s); rollback=%s',
+                                   transaction, phase, failed_area, journal['failure_errno'], journal['status'])
                     if not restored:
                         raise RenameError('The rename could not be fully rolled back. Further renames are blocked; review its rename-history journal.', 503) from None
-                    raise RenameError('The rename failed and was rolled back. No files were overwritten; check filesystem permissions and retry.') from None
+                    raise RenameError(rolled_back_message(failure, phase, failed_area)) from None
         return snapshot_copy, {'transaction_id': transaction, 'destination_directory': plan['destination_directory'],
                                'changed_filenames': plan['changed_filenames'], 'video_count': plan['video_count']}
 
@@ -398,7 +528,8 @@ class MovieRenamer:
             return snapshot
         snapshot = copy.deepcopy(snapshot)
         ordered = sorted(receipts, key=lambda item: item['created_at'])
-        by_path = {alias['old_path']: alias for receipt in ordered for alias in receipt['plan']['affected_media']}
+        by_path = {alias['old_path']: {**alias, 'operation_root': receipt['plan'].get('operation_root', str(self.root))}
+                   for receipt in ordered for alias in receipt['plan']['affected_media']}
         aliases = []
         for original, first in by_path.items():
             alias = dict(first)
@@ -412,14 +543,23 @@ class MovieRenamer:
             try:
                 old_relative = self._relative(alias['old_path'])
                 new_relative = self._relative(alias['new_path'])
+                operation_root = Path(alias['operation_root'])
                 try:
-                    with open_directory(self.root, old_relative.parts[:-1]) as fd:
+                    with open_directory(operation_root, old_relative.parts[:-1]) as fd:
                         lstat_at(fd, old_relative.name)
                 except FileNotFoundError:
                     pass
                 else:
                     continue
-                with open_directory(self.root, new_relative.parts[:-1]) as fd:
+                if operation_root != self.root:
+                    old_physical = operation_root.joinpath(*old_relative.parts)
+                    try:
+                        locations = mergerfs_paths(self.root.joinpath(*old_relative.parts))
+                    except RenameError:
+                        locations = []
+                    if any(location != old_physical and location.exists() for location in locations):
+                        continue
+                with open_directory(operation_root, new_relative.parts[:-1]) as fd:
                     if file_identity(lstat_at(fd, new_relative.name)) == alias['identity']:
                         aliases.append(alias)
             except (OSError, RenameError):

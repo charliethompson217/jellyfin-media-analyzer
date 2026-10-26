@@ -58,6 +58,8 @@ Applying a preview renames the containing folder, all video versions, and the si
 
 The backend accesses sidecars on the host filesystem. Nginx's existing `.nfo`/sidecar download restrictions stay in effect, and these files do not need public URLs. After applying a rename, run a Jellyfin library scan so Jellyfin updates its paths. The app updates its own cached links immediately and reconciles known paths while Jellyfin still reports the old ones.
 
+On a MergerFS movie library, the backend reads MergerFS's branch xattrs and performs the rename on the single physical branch holding the selected folder. This is necessary because MergerFS can reject the atomic no-overwrite rename operation. The service account needs access to that physical branch as well as the merged library. A folder or top-level file present on multiple branches is blocked so a partial rename cannot split the movie. Keep `MOVIES_LIBRARY_DIR` pointed at the merged path used for downloads; no separate branch path setting is required.
+
 ## Development
 
 From the repository root, create `.env` from `.env.example`, then load it into your shell with `set -a`, `source .env`, and `set +a`. For development, set a local writable `CACHE_FILE`, for example `/tmp/media-analyzer-dev/cache.json`. Alternatively use `backend/config.py` as described above.

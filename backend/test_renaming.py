@@ -1,9 +1,12 @@
 """Filesystem transaction tests use only disposable temporary movie folders."""
 import copy
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import time
@@ -207,6 +210,31 @@ class RenamingTests(unittest.TestCase):
         self.assertFalse((self.root / NEW).exists())
         self.assertEqual(json.loads(next(self.renamer.state.glob('*.json')).read_text())['status'], 'rolled_back')
 
+    def test_permission_failure_identifies_the_directory_to_check(self):
+        for failing_area, expected in [('parent', 'movie library parent directory'), ('folder', 'selected movie folder')]:
+            with self.subTest(failing_area=failing_area):
+                original = renaming.rename_noreplace
+                def deny(source_fd, source, target_fd, target):
+                    area = 'parent' if source == OLD else 'folder' if source in self.names else None
+                    if area == failing_area:
+                        raise PermissionError(errno.EACCES, 'simulated permission failure')
+                    return original(source_fd, source, target_fd, target)
+                token = self.preview()['token']
+                with patch.object(renaming, 'rename_noreplace', side_effect=deny):
+                    with self.assertRaises(RenameError) as caught:
+                        self.renamer.apply(self.snapshot, token)
+                self.assertIn(expected, str(caught.exception))
+                self.assertNotIn('simulated permission failure', str(caught.exception))
+                self.assertEqual(self.contents(self.folder), self.before)
+                self.assertFalse((self.root / NEW).exists())
+
+    def test_unsupported_atomic_rename_reports_filesystem_cause(self):
+        token = self.preview()['token']
+        with patch.object(renaming, 'rename_noreplace', side_effect=OSError(errno.EINVAL, 'unsupported')):
+            with self.assertRaisesRegex(RenameError, 'does not support the atomic no-overwrite'):
+                self.renamer.apply(self.snapshot, token)
+        self.assertEqual(self.contents(self.folder), self.before)
+
     def test_destination_created_during_apply_is_not_overwritten(self):
         original = renaming.rename_noreplace
         def add_collision(source_fd, source, target_fd, target):
@@ -273,6 +301,95 @@ class RenamingTests(unittest.TestCase):
                 renaming.rename_noreplace(fd, 'first', fd, 'second')
         self.assertEqual(first.read_text(), 'one')
         self.assertEqual(second.read_text(), 'two')
+
+    def test_mergerfs_single_branch_uses_physical_filesystem_and_reconciles_union_paths(self):
+        mount = self.renamer.root.parent
+        branch = (self.base / 'physical-branch').resolve()
+        physical_root = branch / 'movies'
+        physical_root.mkdir(parents=True)
+        shutil.copytree(self.folder, physical_root / OLD)
+        def xattr(path, name, **_kwargs):
+            path = Path(path)
+            if path == mount / '.mergerfs' and name == 'user.mergerfs.branches':
+                return os.fsencode(str(branch) + '=RW')
+            if name == 'user.mergerfs.allpaths' and path.is_relative_to(self.renamer.root):
+                return os.fsencode(branch / path.relative_to(mount))
+            raise OSError(errno.ENODATA, 'not available')
+        with patch.object(renaming, 'mergerfs_mount', return_value=mount), patch.object(renaming.os, 'getxattr', side_effect=xattr, create=True):
+            plan = self.preview()
+            self.assertEqual(plan['source_directory'], str(self.folder.resolve()))
+            updated, _ = self.renamer.apply(self.snapshot, plan['token'])
+            self.assertTrue((physical_root / NEW).is_dir())
+            self.assertFalse((physical_root / OLD).exists())
+            self.assertEqual(self.contents(physical_root / NEW), {
+                NEW + name[len(OLD):] if name.startswith(OLD) else name: value for name, value in self.before.items()})
+            # MergerFS can briefly keep the old union path cached after a
+            # physical rename; the receipt uses the physical inode instead.
+            self.assertTrue(self.folder.exists())
+            reconciled = self.renamer.reconcile(self.snapshot)
+        self.assertEqual([row['path'] for row in reconciled['data']], [row['path'] for row in updated['data']])
+
+    def test_mergerfs_mount_detection_requires_real_mountinfo(self):
+        mounts = '1 0 0:1 / /srv/jellyfin/media rw - fuse.mergerfs MergerFS rw\n'
+        with patch.object(renaming.sys, 'platform', 'linux'), patch.object(renaming.Path, 'read_text', return_value=mounts):
+            self.assertEqual(renaming.mergerfs_mount(Path('/srv/jellyfin/media/movies')), Path('/srv/jellyfin/media'))
+            self.assertIsNone(renaming.mergerfs_mount(Path('/other/movies')))
+
+    def test_mergerfs_rejects_folders_with_files_on_multiple_branches(self):
+        mount = self.renamer.root.parent
+        branch = (self.base / 'physical-branch').resolve()
+        (branch / 'movies').mkdir(parents=True)
+        shutil.copytree(self.folder, branch / 'movies' / OLD)
+        def xattr(path, name, **_kwargs):
+            path = Path(path)
+            if path == mount / '.mergerfs':
+                return os.fsencode(branch)
+            location = os.fsencode(branch / path.relative_to(mount))
+            if path.name == self.videos[0]:
+                return location + b'\0' + os.fsencode(self.base / 'another-branch' / path.relative_to(mount))
+            return location
+        with patch.object(renaming, 'mergerfs_mount', return_value=mount), patch.object(renaming.os, 'getxattr', side_effect=xattr, create=True):
+            with self.assertRaisesRegex(RenameError, 'multiple MergerFS branches'):
+                self.preview()
+        self.assertEqual(self.contents(self.folder), self.before)
+
+    def test_mergerfs_rejects_physical_path_outside_its_configured_branches(self):
+        mount = self.renamer.root.parent
+        allowed = (self.base / 'allowed-branch').resolve()
+        other = (self.base / 'other-branch').resolve()
+        def xattr(path, name, **_kwargs):
+            if Path(path) == mount / '.mergerfs':
+                return os.fsencode(allowed)
+            return os.fsencode(other / Path(path).relative_to(mount))
+        with patch.object(renaming, 'mergerfs_mount', return_value=mount), patch.object(renaming.os, 'getxattr', side_effect=xattr, create=True):
+            with self.assertRaisesRegex(RenameError, 'outside the configured MergerFS branches'):
+                self.preview()
+        self.assertEqual(self.contents(self.folder), self.before)
+
+    def test_mergerfs_other_branch_collision_during_apply_rolls_back(self):
+        mount = self.renamer.root.parent
+        branch = (self.base / 'physical-branch').resolve()
+        physical_root = branch / 'movies'
+        physical_root.mkdir(parents=True)
+        shutil.copytree(self.folder, physical_root / OLD)
+        def xattr(path, name, **_kwargs):
+            path = Path(path)
+            if path == mount / '.mergerfs':
+                return os.fsencode(branch)
+            return os.fsencode(branch / path.relative_to(mount))
+        original = renaming.rename_noreplace
+        def collide(source_fd, source, target_fd, target):
+            original(source_fd, source, target_fd, target)
+            if source == OLD:
+                (self.root / NEW).mkdir()
+        with patch.object(renaming, 'mergerfs_mount', return_value=mount), \
+             patch.object(renaming.os, 'getxattr', side_effect=xattr, create=True), \
+             patch.object(renaming, 'rename_noreplace', side_effect=collide):
+            with self.assertRaisesRegex(RenameError, 'rolled back'):
+                self.renamer.apply(self.snapshot, self.preview()['token'])
+        self.assertTrue((physical_root / OLD).is_dir())
+        self.assertFalse((physical_root / NEW).exists())
+        self.assertEqual(list((self.root / NEW).iterdir()), [])
 
     def test_api_feature_gate_and_csrf_action_check(self):
         client = self.configure_api(enabled=False)
