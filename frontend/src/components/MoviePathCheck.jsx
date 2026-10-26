@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { serializeCSV } from '../utils/helpers';
 import { categoryLabel, filterPathResults, PATH_CATEGORIES, PATH_EXPORT_COLUMNS, pathExportRows } from '../utils/moviePaths';
+import MovieRenameDialog from './MovieRenameDialog';
 
 const PAGE_SIZE = 25;
 const CONTROL = 'border border-gray-300 rounded-md px-3 py-2 text-sm bg-white';
@@ -21,7 +22,7 @@ function ComponentDetails({ row, side }) {
   </section>;
 }
 
-export default function MoviePathCheck({ snapshot, mediaLoading }) {
+export default function MoviePathCheck({ snapshot, mediaLoading, onLibraryChanged }) {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -29,6 +30,8 @@ export default function MoviePathCheck({ snapshot, mediaLoading }) {
   const [filters, setFilters] = useState({ search: '', category: '', flag: '', issuesOnly: true });
   const [page, setPage] = useState(0);
   const [expanded, setExpanded] = useState(new Set());
+  const [renameRow, setRenameRow] = useState(null);
+  const [notice, setNotice] = useState(null);
   const active = useRef(null);
   const timer = useRef(null);
   useEffect(() => () => { active.current?.abort(); active.current = null; clearTimeout(timer.current); }, []);
@@ -77,11 +80,18 @@ export default function MoviePathCheck({ snapshot, mediaLoading }) {
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  const outdated = report && snapshot?.scannedAt && report.scanned_at !== snapshot.scannedAt;
+  const reportRevision = report?.snapshot_revision || report?.scanned_at;
+  const outdated = report && snapshot?.scannedAt && reportRevision !== (snapshot.revision || snapshot.scannedAt);
+  const renamed = async result => {
+    setRenameRow(null);
+    setNotice(`Renamed ${result.video_count} movie versions and their associated files. ${result.warning || 'Run a library scan in Jellyfin to update its own paths.'}`);
+    await runCheck();
+    await onLibraryChanged?.();
+  };
 
   return <div className="space-y-6">
     <section className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
-      <div className="flex flex-wrap items-center gap-3 mb-2"><h2 className="text-2xl font-bold">Movie Path Check</h2><span className="rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-800">Read-only</span></div>
+      <div className="flex flex-wrap items-center gap-3 mb-2"><h2 className="text-2xl font-bold">Movie Path Check</h2>{report && <span className="rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-800">{report.rename_enabled ? 'Folder renaming enabled' : 'Read-only'}</span>}</div>
       <p className="text-gray-600">Compare movie folder and file names against Jellyfin titles and years. All movie versions in the library snapshot are included; overview filters do not apply.</p>
       <div className="flex flex-wrap items-end gap-4 mt-5">
         <label className="text-sm font-medium">Spelling similarity threshold (%)
@@ -94,8 +104,10 @@ export default function MoviePathCheck({ snapshot, mediaLoading }) {
       <p className="text-xs text-gray-500 mt-4">Checks use the paths reported by Jellyfin and compare names, not file existence. The overall category uses the better-matching folder or filename, with differences flagged separately.</p>
     </section>
     {error && <div role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-4 text-amber-900">{error}{report && ' Showing the last completed report.'}</div>}
+    {notice && <p role="status" className="p-4 rounded-md border border-green-200 bg-green-50 text-green-900">{notice}</p>}
     {outdated && <p role="status" className="text-sm text-amber-800">The library snapshot has changed. Run Path Check again to update these results.</p>}
     {report && <>
+      {!report.rename_enabled && <p className="text-sm text-gray-600">To rename movie folders and associated files here, set ENABLE_RENAMING=true on the server and grant its service account access to the movie directories.</p>}
       <p className="text-sm text-gray-600" role="status">{report.summary.checked} movie files checked against the snapshot from {new Date(report.scanned_at).toLocaleString()} · Spelling threshold: {report.spelling_threshold}%</p>
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">{[
         ['Movie files / versions', report.summary.total_movies], ['Naming issues', report.summary.needs_review],
@@ -121,7 +133,9 @@ export default function MoviePathCheck({ snapshot, mediaLoading }) {
                 <td className="px-4 py-4 min-w-48">{row.expected_component || 'Unavailable'}</td>
                 <td className="px-4 py-4 min-w-48"><span className={`inline-block rounded-full px-3 py-1 text-xs font-medium ${row.needs_review ? 'bg-amber-50 text-amber-900' : 'bg-green-50 text-green-800'}`}>{categoryLabel(row.category)}</span><div className="mt-2 text-gray-600">{row.status === 'checked' ? `Best title similarity: ${row.best_title_similarity}%` : row.uncheckable_reason}</div></td>
                 <td className="px-4 py-4 min-w-48">{row.status === 'checked' ? <><div>{row.folder_file_exact_match ? 'Same title/year component' : 'Folder/file differ'}</div>{row.incorrectly_formatted_version_tag && <div className="text-amber-800 mt-1">Misplaced version tag</div>}</> : 'Not checked'}</td>
-                <td className="px-4 py-4"><button type="button" aria-expanded={expanded.has(row.id)} aria-controls={`path-details-${row.id}`} aria-label={`Details for ${row.title} ${row.version_name}`} className="text-blue-700 underline" onClick={() => setExpanded(current => { const next = new Set(current); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; })}>{expanded.has(row.id) ? 'Hide details' : 'View details'}</button></td>
+                <td className="px-4 py-4"><button type="button" aria-expanded={expanded.has(row.id)} aria-controls={`path-details-${row.id}`} aria-label={`Details for ${row.title} ${row.version_name}`} className="text-blue-700 underline" onClick={() => setExpanded(current => { const next = new Set(current); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; })}>{expanded.has(row.id) ? 'Hide details' : 'View details'}</button>
+                  {report.rename_enabled && <button type="button" disabled={outdated || loading || mediaLoading || !row.path} onClick={() => setRenameRow(row)} aria-label={`Rename folder for ${row.title} ${row.version_name}`} className="block mt-3 text-blue-700 underline disabled:opacity-50">Rename folder &amp; files</button>}
+                </td>
               </tr>
               {expanded.has(row.id) && <tr id={`path-details-${row.id}`} className="border-t border-gray-100 bg-gray-50"><td colSpan={5} className="p-5">
                 <p className="text-xs text-gray-500 mb-1">Jellyfin path</p><p className="break-all font-mono text-sm mb-4">{row.path || 'Unknown'}</p>
@@ -135,5 +149,6 @@ export default function MoviePathCheck({ snapshot, mediaLoading }) {
         <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-50 border-t border-gray-200 p-4 text-sm"><span>Page {pageCount ? currentPage + 1 : 0} of {pageCount}</span><div className="flex gap-2"><button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)} className="border px-3 py-2 rounded-md disabled:opacity-50">Previous results</button><button type="button" disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)} className="border px-3 py-2 rounded-md disabled:opacity-50">Next results</button></div></div>
       </section>
     </>}
+    {renameRow && <MovieRenameDialog key={renameRow.id} row={renameRow} snapshotRevision={reportRevision} onClose={() => setRenameRow(null)} onRenamed={renamed} />}
   </div>;
 }

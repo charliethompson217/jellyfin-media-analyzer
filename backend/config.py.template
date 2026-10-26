@@ -13,3 +13,4 @@ MOVIES_LIBRARY_DIR = ''  # Local directory available to Flask/Nginx.
 TVSHOWS_LIBRARY_DIR = ''
 JELLYFIN_MOVIES_DIR = ''  # Jellyfin's corresponding directory (e.g. inside a container).
 JELLYFIN_TVSHOWS_DIR = ''
+ENABLE_RENAMING = False

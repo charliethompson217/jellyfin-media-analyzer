@@ -104,6 +104,17 @@ describe('movie path workflow', () => {
     expect(screen.getByText(/library snapshot has changed/)).toBeTruthy();
   });
 
+  it('shows rename actions only when enabled and disables stale report actions', async () => {
+    const enabled = { ...report([issue]), rename_enabled: true, snapshot_revision: 'revision-1' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(enabled)));
+    const { rerender } = render(<MoviePathCheck snapshot={{ ...snapshot, revision: 'revision-1' }} mediaLoading={false} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run Path Check' }));
+    const button = await screen.findByRole('button', { name: 'Rename folder for The Matrix Extended' });
+    expect(button.disabled).toBe(false);
+    rerender(<MoviePathCheck snapshot={{ ...snapshot, revision: 'revision-2' }} mediaLoading={false} />);
+    expect(button.disabled).toBe(true);
+  });
+
   it('requires a loaded snapshot and a valid threshold', () => {
     const { rerender } = render(<MoviePathCheck snapshot={null} mediaLoading={false} />);
     expect(screen.getByRole('button', { name: 'Run Path Check' }).disabled).toBe(true);

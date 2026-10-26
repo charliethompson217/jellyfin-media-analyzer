@@ -14,6 +14,9 @@ for name in "${required[@]}"; do
     [[ -n ${!name:-} ]] || { echo "Missing configuration: $name" >&2; exit 1; }
 done
 ENABLE_FANCYINDEX=${ENABLE_FANCYINDEX:-false}
+ENABLE_RENAMING=${ENABLE_RENAMING:-false}
+[[ $ENABLE_RENAMING == true || $ENABLE_RENAMING == false ]] || { echo 'ENABLE_RENAMING must be true or false.' >&2; exit 1; }
+export ENABLE_RENAMING
 case "$ENABLE_FANCYINDEX" in
     true)
         MEDIA_INDEX_DIRECTIVES='autoindex off;
@@ -139,7 +142,7 @@ as_builder() {
 }
 
 mkdir -p -- "${BACKEND_DIR}.releases" "${FRONTEND_DIR}.releases" "$BACKEND_RELEASE" "$FRONTEND_RELEASE" "$BUILD_DIR/frontend"
-cp -- "$REPO_DIR"/backend/{app.py,media.py,movie_paths.py,settings.py,requirements.txt,test_app.py,test_movie_paths.py} "$BACKEND_RELEASE/"
+cp -- "$REPO_DIR"/backend/{app.py,media.py,movie_paths.py,renaming.py,settings.py,requirements.txt,test_app.py,test_movie_paths.py,test_renaming.py} "$BACKEND_RELEASE/"
 cp -- "$REPO_DIR"/frontend/{package.json,package-lock.json,vite.config.js,eslint.config.js,index.html} "$BUILD_DIR/frontend/"
 cp -R -- "$REPO_DIR/frontend/src" "$BUILD_DIR/frontend/"
 chown -R "$BUILD_USER" -- "$BACKEND_RELEASE" "$BUILD_DIR"
@@ -168,7 +171,7 @@ names = {'JELLYFIN_URL': 'JELLYFIN_URL', 'API_KEY': 'JELLYFIN_API_KEY',
          'JELLYFIN_USER_ID': 'JELLYFIN_USER_ID', 'CACHE_MAX_AGE': 'CACHE_MAX_AGE',
          'SCAN_TIMEOUT': 'SCAN_TIMEOUT', 'MOVIES_LIBRARY_DIR': 'MOVIES_LIBRARY_DIR',
          'TVSHOWS_LIBRARY_DIR': 'TVSHOWS_LIBRARY_DIR', 'JELLYFIN_MOVIES_DIR': 'JELLYFIN_MOVIES_DIR',
-         'JELLYFIN_TVSHOWS_DIR': 'JELLYFIN_TVSHOWS_DIR'}
+         'JELLYFIN_TVSHOWS_DIR': 'JELLYFIN_TVSHOWS_DIR', 'ENABLE_RENAMING': 'ENABLE_RENAMING'}
 defaults = {'JELLYFIN_USER_ID': '', 'CACHE_MAX_AGE': '3600', 'SCAN_TIMEOUT': '240'}
 with open(sys.argv[1], 'w', encoding='utf-8') as handle:
     for key, env in names.items():

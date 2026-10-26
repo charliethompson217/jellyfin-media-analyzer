@@ -1,4 +1,5 @@
 import fcntl
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -7,6 +8,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 import requests
@@ -15,9 +17,10 @@ from werkzeug.exceptions import HTTPException
 
 from media import download_url, normalize_items, number
 from movie_paths import analyze_movies, DEFAULT_SPELLING_THRESHOLD
+from renaming import MovieRenamer, RenameError, revision
 from settings import (
     API_KEY, CACHE_FILE, CACHE_MAX_AGE, JELLYFIN_MOVIES_DIR, JELLYFIN_TVSHOWS_DIR,
-    JELLYFIN_URL, JELLYFIN_USER_ID, MOVIES_LIBRARY_DIR, PORT, SCAN_TIMEOUT, TVSHOWS_LIBRARY_DIR,
+    JELLYFIN_URL, JELLYFIN_USER_ID, MOVIES_LIBRARY_DIR, PORT, SCAN_TIMEOUT, TVSHOWS_LIBRARY_DIR, ENABLE_RENAMING,
 )
 
 app = Flask(__name__)
@@ -91,7 +94,7 @@ def fetch_all_items(session, deadline):
 
 
 def cache_identity():
-    scope = [JELLYFIN_URL, API_KEY, JELLYFIN_USER_ID, JELLYFIN_MOVIES_DIR, JELLYFIN_TVSHOWS_DIR]
+    scope = [JELLYFIN_URL, API_KEY, JELLYFIN_USER_ID, JELLYFIN_MOVIES_DIR, JELLYFIN_TVSHOWS_DIR, MOVIES_LIBRARY_DIR, TVSHOWS_LIBRARY_DIR]
     return hashlib.sha256(json.dumps(scope).encode()).hexdigest()
 
 
@@ -131,7 +134,7 @@ def read_cache():
             expected_url = download_url(row['path'], [(JELLYFIN_MOVIES_DIR, '/movies/'), (JELLYFIN_TVSHOWS_DIR, '/tv_shows/')])
             if row.get('download_url') != expected_url:
                 return None
-        return snapshot
+        return reconcile_renames(snapshot)
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
@@ -152,10 +155,39 @@ def write_cache(snapshot):
             os.unlink(temporary)
 
 
+def reconcile_renames(snapshot):
+    if MOVIES_LIBRARY_DIR and JELLYFIN_MOVIES_DIR:
+        try:
+            return MovieRenamer(CACHE_FILE, MOVIES_LIBRARY_DIR, JELLYFIN_MOVIES_DIR).reconcile(snapshot)
+        except (RenameError, OSError, ValueError, KeyError, TypeError):
+            app.logger.warning('Unable to reconcile prior movie renames; serving the saved snapshot.')
+    return snapshot
+
+
+@contextmanager
+def snapshot_edit_lock():
+    if not SCAN_LOCK.acquire(blocking=False):
+        raise RenameError('A library scan or rename is running. Please retry shortly.', 503)
+    handle = None
+    try:
+        Path(CACHE_FILE).parent.mkdir(parents=True, exist_ok=True)
+        handle = open(f'{CACHE_FILE}.lock', 'a')
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RenameError('A library scan or rename is running. Please retry shortly.', 503) from None
+        yield
+    finally:
+        if handle:
+            handle.close()
+        SCAN_LOCK.release()
+
+
 def snapshot_response(snapshot, *, stale=False, in_progress=False, error=None):
     response = jsonify(snapshot['data'])  # Keep the existing array API contract.
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Scanned-At'] = snapshot['scanned_at']
+    response.headers['X-Snapshot-Revision'] = revision(snapshot)
     response.headers['X-Cache-Stale'] = str(stale).lower()
     response.headers['X-Scan-In-Progress'] = str(in_progress).lower()
     response.headers['X-Skipped-Records'] = str(snapshot['skipped_records'])
@@ -178,6 +210,11 @@ def safe_error(error):
     # No exception text or traceback: nested exceptions may hold credentials.
     app.logger.error('An unexpected media API error occurred.')
     return jsonify({'error': 'Unable to complete the request. Please try again.'}), 500
+
+
+@app.errorhandler(RenameError)
+def rename_error(error):
+    return jsonify({'error': str(error)}), error.status
 
 
 @app.route('/api/media')
@@ -211,7 +248,9 @@ def get_media():
         fresh = {
             'version': CACHE_VERSION, 'identity': cache_identity(), 'data': data,
             'scanned_at': datetime.now(timezone.utc).isoformat(), 'skipped_records': skipped,
+            'revision': uuid.uuid4().hex,
         }
+        fresh = reconcile_renames(fresh)
         try:
             write_cache(fresh)
         except OSError:
@@ -250,7 +289,63 @@ def check_movie_paths():
         return jsonify({'error': 'Reload the media library before running a movie path check.'}), 409
     report = analyze_movies(snapshot['data'], threshold)
     report['scanned_at'] = snapshot['scanned_at']
+    report['snapshot_revision'] = revision(snapshot)
+    report['rename_enabled'] = ENABLE_RENAMING
     return jsonify(report)
+
+
+def rename_payload():
+    if not ENABLE_RENAMING:
+        raise RenameError('Movie renaming is disabled. Set ENABLE_RENAMING=true on the server to enable it.', 403)
+    if request.headers.get('X-Media-Analyzer-Action') != 'rename' or request.headers.get('Sec-Fetch-Site') == 'cross-site':
+        raise RenameError('The rename request did not pass the same-origin action check.', 403)
+    request.max_content_length = 16384
+    if not request.is_json:
+        raise RenameError('Rename requests must use JSON.', 415)
+    body = request.get_json()
+    if not isinstance(body, dict):
+        raise RenameError('Invalid rename request.', 400)
+    return body
+
+
+@app.post('/api/movie-renames/preview')
+def preview_movie_rename():
+    body = rename_payload()
+    if not isinstance(body.get('row_id'), str):
+        raise RenameError('Select a movie from the path report.', 400)
+    try:
+        with snapshot_edit_lock():
+            snapshot = read_cache()
+            if snapshot is None or body.get('snapshot_revision') != revision(snapshot):
+                raise RenameError('The library changed. Refresh the path report before previewing a rename.')
+            return jsonify(MovieRenamer(CACHE_FILE, MOVIES_LIBRARY_DIR, JELLYFIN_MOVIES_DIR).preview(snapshot, body['row_id'], body.get('prefix')))
+    except PermissionError:
+        raise RenameError('The service account cannot read the movie folder or rename state. Check host directory permissions.', 403) from None
+    except OSError:
+        raise RenameError('The movie folder is unavailable. Check the host path mapping and filesystem permissions.') from None
+
+
+@app.post('/api/movie-renames/apply')
+def apply_movie_rename():
+    body = rename_payload()
+    if not isinstance(body.get('token'), str):
+        raise RenameError('Preview the rename before applying it.', 400)
+    try:
+        with snapshot_edit_lock():
+            snapshot = read_cache()
+            if snapshot is None:
+                raise RenameError('Reload the library and preview the rename again.')
+            updated, result = MovieRenamer(CACHE_FILE, MOVIES_LIBRARY_DIR, JELLYFIN_MOVIES_DIR).apply(snapshot, body['token'])
+            try:
+                write_cache(updated)
+            except OSError:
+                result['warning'] = 'The files were renamed, but the snapshot could not be saved. Reload the library to reconcile its paths.'
+            result['snapshot_revision'] = revision(updated)
+            return jsonify(result)
+    except PermissionError:
+        raise RenameError('The service account needs write access to the movie folder and its parent directory.', 403) from None
+    except OSError:
+        raise RenameError('Unable to start the rename. Check filesystem access and preview again.') from None
 
 
 def local_download(directory, filename):

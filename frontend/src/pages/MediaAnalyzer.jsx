@@ -8,7 +8,7 @@ import MoviePathCheck from '../components/MoviePathCheck';
 import { applyFilters } from '../utils/helpers';
 
 function MediaAnalyzer() {
-  const { data, loading, error, snapshot, reload } = useMediaData();
+  const { data, loading, error, snapshot, reload, reloadSnapshot } = useMediaData();
   const [filters, setFilters] = useState({ search: '', supportedFormats: [], resolutionGroups: [], types: [], hiddenColumns: [] });
   const [chartMode, setChartMode] = useState('count'); // 'count', 'size', or 'duration'
   const [view, setView] = useState('overview');
@@ -102,7 +102,7 @@ function MediaAnalyzer() {
           <MediaTable data={filteredData} hiddenColumns={filters.hiddenColumns} />
         </div>
         <div role="tabpanel" id="panel-paths" aria-labelledby="tab-paths" hidden={view !== 'paths'}>
-          <MoviePathCheck snapshot={snapshot} mediaLoading={loading} />
+          <MoviePathCheck snapshot={snapshot} mediaLoading={loading} onLibraryChanged={reloadSnapshot} />
         </div>
       </div>
     </div>

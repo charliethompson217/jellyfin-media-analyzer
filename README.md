@@ -17,7 +17,7 @@ A Flask/React application for inspecting the files and versions in a Jellyfin li
 
 The installer builds and tests as a non-root user without passing server credentials to dependency code. It stages immutable backend/frontend releases, validates Nginx before switching the running app, checks backend health, and restores the previous release/configuration if activation fails. Existing password-file users are preserved. Previous releases remain under `<BACKEND_DIR>.releases` and `<FRONTEND_DIR>.releases`; the configured app directories become symlinks. Existing directory installs are retained as `legacy-*` releases on first migration.
 
-`CACHE_FILE` must be an absolute path outside both app directories, such as `/opt/media-analyzer.state/cache.json`. Only that state directory is writable by the service. Avoid placing unrelated files in it. Keep deployment directories separate and dedicated to this app. The installer is intended for GNU/Linux; macOS is supported for local application development, not system deployment.
+`CACHE_FILE` must be an absolute path outside both app directories, such as `/opt/media-analyzer.state/cache.json`. The state directory is writable by the service; when renaming is enabled, the service also needs write access to movie folders and their parent directories. Avoid placing unrelated files in the state directory. Keep deployment directories separate and dedicated to this app. The installer is intended for GNU/Linux; macOS is supported for local application development, not system deployment.
 
 The installer does not edit Nginx's main configuration or install missing OS packages. Certificate/key and media directories must already exist. Failed builds leave the current application untouched; failed activations restore the previous app/configuration. Staged release directories are retained for diagnosis and can be removed after verifying they are not an active/previous release.
 
@@ -32,6 +32,7 @@ Environment variables take precedence over optional `backend/config.py` settings
 - `MOVIES_LIBRARY_DIR`, `TVSHOWS_LIBRARY_DIR`: local directories served by Nginx in production and Flask in development.
 - `JELLYFIN_MOVIES_DIR`, `JELLYFIN_TVSHOWS_DIR`: optional corresponding paths returned by Jellyfin, if it runs inside a container or uses different mount points. They default to the local library paths.
 - `ENABLE_FANCYINDEX`: `false` (default) uses built-in directory listings without requiring the Fancyindex module. Set `true` to render Fancyindex directives; install/load the module first. Both modes preserve media aliases, authentication, and the existing sidecar access restrictions. Basic listings can show sidecar names even though those files remain inaccessible.
+- `ENABLE_RENAMING`: `false` (default) keeps the movie path checker read-only. Set `true` to show the folder rename action. The installer does not change media ownership or permissions; grant the configured `SERVICE_USER` write and search access to movie folders and their parent directories using your existing group or ACL setup. Everyone who can authenticate to this app can then rename movie folders.
 
 Only recognized library paths become download links; filenames are URL-encoded, and unmapped/unknown paths remain text. Nginx provides HTTPS Basic Auth for the site, API, and downloads. The backend is deliberately bound to loopback and has no independent login; keep it behind that proxy in production.
 
@@ -39,7 +40,7 @@ An expired snapshot triggers a refresh. Other requests can use the last snapshot
 
 ## Movie path checks
 
-Open **Movie Path Check**, then choose **Run Path Check**. This compares every movie file/version in the library snapshot against its Jellyfin title and production year. Overview filters do not limit the check, and TV episodes are excluded. The feature compares path names reported by Jellyfin; it does not inspect the host filesystem or rename files, so container/host path differences need no additional checker configuration.
+Open **Movie Path Check**, then choose **Run Path Check**. This compares every movie file/version in the library snapshot against its Jellyfin title and production year. Overview filters do not limit the check, and TV episodes are excluded. The check compares paths reported by Jellyfin without inspecting the host filesystem; container/host path differences need no additional checker configuration.
 
 The checker groups results into exact, case/symbol, year, spelling, and possible-misidentification categories. Matching supports accent folding, Roman/Arabic numerals, `&`/`and`, colon subtitle variants, and misplaced edition/version tags. The spelling threshold defaults to 92% and can be changed before each run. A filename's trailing ` - [Version]` tag is ignored for title/year comparison.
 
@@ -48,6 +49,14 @@ The overall category follows the **better-matching folder or filename**. A good 
 Use search, category, and flag filters to narrow the report. **View details** shows both component comparisons, year differences, matching variants, misplaced version tags, and the original Jellyfin path. **Export Path CSV** exports every filtered result across all pages, including detailed fields and spreadsheet-safe text. Missing titles, production years, or usable paths appear as **Not checked** with a reason rather than being classified as misidentified.
 
 Checks reuse the saved library snapshot and do not make additional Jellyfin requests. Reload the library when metadata changes, then rerun the check; existing reports show a notice when the library snapshot changes. This update adds production years to the snapshot schema, so older snapshots are automatically refreshed after deployment.
+
+### Rename a movie folder
+
+With `ENABLE_RENAMING=true`, select **Rename folder & files** on a movie row. The preview shows every top-level entry in the host folder before anything changes. **Use checker suggestion** uses Jellyfin's title and production year; you can also enter the exact shared prefix you want and choose **Preview changes**. The backend derives the host folder from the saved Jellyfin path using `JELLYFIN_MOVIES_DIR` and `MOVIES_LIBRARY_DIR`, so for example `/home/jellyfin/media/movies` can map to `/srv/jellyfin/media/movies`. The browser never supplies a host path.
+
+Applying a preview renames the containing folder, all video versions, and the sidecar files associated with each video's full stem. Version tags, language/forced subtitle suffixes, extensions, and file bytes are preserved. Shared artwork such as `folder.jpg` and `backdrop.jpg`, plus `movie.nfo`, keep their names and move with the folder. Other files and nested extras directories move with the folder unchanged; names *inside* nested directories are not rewritten. Ambiguous sidecar ownership, name collisions, top-level symlinks, and changed top-level entries block the rename. The app uses atomic operations that refuse to overwrite a destination, records a private transaction journal under the cache state directory, and attempts to roll back a failed batch. If a journal reports `needs_recovery` or remains `pending` after a crash, review the journal and folder contents before further renames; the app blocks them in the meantime.
+
+The backend accesses sidecars on the host filesystem. Nginx's existing `.nfo`/sidecar download restrictions stay in effect, and these files do not need public URLs. After applying a rename, run a Jellyfin library scan so Jellyfin updates its paths. The app updates its own cached links immediately and reconciles known paths while Jellyfin still reports the old ones.
 
 ## Development
 

@@ -97,7 +97,7 @@ class InstallerTests(unittest.TestCase):
         self.repo.mkdir()
         for name in ('backend', 'frontend', 'infra', 'scripts'):
             (self.repo / name).mkdir()
-        for name in ('app.py', 'media.py', 'movie_paths.py', 'settings.py', 'requirements.txt', 'test_app.py', 'test_movie_paths.py'):
+        for name in ('app.py', 'media.py', 'movie_paths.py', 'renaming.py', 'settings.py', 'requirements.txt', 'test_app.py', 'test_movie_paths.py', 'test_renaming.py'):
             shutil.copyfile(ROOT / 'backend' / name, self.repo / 'backend' / name)
         for name in ('package.json', 'package-lock.json', 'vite.config.js', 'eslint.config.js', 'index.html'):
             shutil.copyfile(ROOT / 'frontend' / name, self.repo / 'frontend' / name)
@@ -166,6 +166,10 @@ class InstallerTests(unittest.TestCase):
         with (self.repo / '.env').open('a') as handle:
             handle.write('ENABLE_FANCYINDEX=' + shlex.quote(value) + '\n')
 
+    def configure_renaming(self, value):
+        with (self.repo / '.env').open('a') as handle:
+            handle.write('ENABLE_RENAMING=' + shlex.quote(value) + '\n')
+
     def test_success_migrates_directory_install_preserves_users_and_safely_serializes_key(self):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -181,6 +185,7 @@ class InstallerTests(unittest.TestCase):
         config = ast.parse((self.backend / 'config.py').read_text())
         settings = {node.targets[0].id: ast.literal_eval(node.value) for node in config.body}
         self.assertEqual(settings['API_KEY'], self.secret)
+        self.assertEqual(settings['ENABLE_RENAMING'], 'false')
         self.assertIn('other:preserved-hash', self.password.read_text())
         # A second update must also work when deployment paths are symlinks.
         result = self.run_installer()
@@ -219,6 +224,24 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('ENABLE_FANCYINDEX must be true or false.', result.stderr)
+        self.assert_restored()
+        self.assertEqual(self.service_commands(), [])
+
+    def test_renaming_flag_is_deployed_without_changing_sidecar_http_rules(self):
+        self.configure_renaming('true')
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = ast.parse((self.backend / 'config.py').read_text())
+        settings = {node.targets[0].id: ast.literal_eval(node.value) for node in config.body}
+        self.assertEqual(settings['ENABLE_RENAMING'], 'true')
+        self.assertIn('renaming.py', [path.name for path in self.backend.iterdir()])
+        self.assertEqual(self.config.read_text().count('deny all;'), 2)
+
+    def test_invalid_renaming_value_fails_before_changing_the_deployment(self):
+        self.configure_renaming('maybe')
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ENABLE_RENAMING must be true or false.', result.stderr)
         self.assert_restored()
         self.assertEqual(self.service_commands(), [])
 

@@ -26,7 +26,7 @@ export default function useMediaData() {
       if (!Array.isArray(body)) throw new Error('The server returned an invalid media list.');
       setData(body);
       const inProgress = response.headers.get('X-Scan-In-Progress') === 'true';
-      setSnapshot({ scannedAt: response.headers.get('X-Scanned-At'), stale: response.headers.get('X-Cache-Stale') === 'true',
+      setSnapshot({ scannedAt: response.headers.get('X-Scanned-At'), revision: response.headers.get('X-Snapshot-Revision') || response.headers.get('X-Scanned-At'), stale: response.headers.get('X-Cache-Stale') === 'true',
         skipped: Number(response.headers.get('X-Skipped-Records') || 0), inProgress });
       setError(response.headers.get('X-Refresh-Error') || (inProgress ? 'A scan is already running. Showing the last snapshot; retry shortly.' : null));
     } catch (failure) {
@@ -44,5 +44,5 @@ export default function useMediaData() {
     return () => { clearTimeout(timeoutRef.current); active.current?.abort(); active.current = null; };
   }, [fetchData]);
 
-  return { data, loading, error, snapshot, reload: () => fetchData(true) };
+  return { data, loading, error, snapshot, reload: () => fetchData(true), reloadSnapshot: () => fetchData(false) };
 }
