@@ -1,6 +1,7 @@
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -13,6 +14,7 @@ from flask import Flask, abort, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
 
 from media import download_url, normalize_items, number
+from movie_paths import analyze_movies, DEFAULT_SPELLING_THRESHOLD
 from settings import (
     API_KEY, CACHE_FILE, CACHE_MAX_AGE, JELLYFIN_MOVIES_DIR, JELLYFIN_TVSHOWS_DIR,
     JELLYFIN_URL, JELLYFIN_USER_ID, MOVIES_LIBRARY_DIR, PORT, SCAN_TIMEOUT, TVSHOWS_LIBRARY_DIR,
@@ -20,7 +22,7 @@ from settings import (
 
 app = Flask(__name__)
 SCAN_LOCK = threading.Lock()
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 
@@ -70,7 +72,9 @@ def fetch_all_items(session, deadline):
     while True:
         params = {
             'IncludeItemTypes': 'Movie,Episode', 'Recursive': 'true',
-            'Fields': 'MediaSources,MediaStreams,Path,SeriesName,SeasonName,IndexNumber',
+            # Title, year and episode names are normal DTO properties, not ItemFields.
+            # https://typescript-sdk.jellyfin.org/variables/generated-client.ItemFields.html
+            'Fields': 'MediaSources,MediaStreams,Path',
             'CollapseBoxSetItems': 'false', 'SortBy': 'SortName', 'SortOrder': 'Ascending',
             'StartIndex': start_index, 'Limit': 500,
         }
@@ -118,6 +122,11 @@ def read_cache():
                 if key not in row or (row[key] is not None and number(row[key]) is None):
                     return None
             if row['path'] is not None and not isinstance(row['path'], str):
+                return None
+            if 'metadata_title' not in row or (row['metadata_title'] is not None and not isinstance(row['metadata_title'], str)):
+                return None
+            year = row.get('production_year')
+            if 'production_year' not in row or (year is not None and (type(year) is not int or not 1000 <= year <= 9999)):
                 return None
             expected_url = download_url(row['path'], [(JELLYFIN_MOVIES_DIR, '/movies/'), (JELLYFIN_TVSHOWS_DIR, '/tv_shows/')])
             if row.get('download_url') != expected_url:
@@ -226,6 +235,22 @@ def get_media():
 @app.route('/api/health')
 def health():
     return jsonify({'status': 'ok'})
+
+
+@app.get('/api/movie-paths')
+def check_movie_paths():
+    try:
+        threshold = float(request.args.get('spelling_threshold', DEFAULT_SPELLING_THRESHOLD))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Spelling threshold must be a number from 0 to 100.'}), 400
+    if not math.isfinite(threshold) or not 0 <= threshold <= 100:
+        return jsonify({'error': 'Spelling threshold must be a number from 0 to 100.'}), 400
+    snapshot = read_cache()
+    if snapshot is None:
+        return jsonify({'error': 'Reload the media library before running a movie path check.'}), 409
+    report = analyze_movies(snapshot['data'], threshold)
+    report['scanned_at'] = snapshot['scanned_at']
+    return jsonify(report)
 
 
 def local_download(directory, filename):

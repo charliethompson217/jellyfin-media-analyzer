@@ -97,7 +97,7 @@ class InstallerTests(unittest.TestCase):
         self.repo.mkdir()
         for name in ('backend', 'frontend', 'infra', 'scripts'):
             (self.repo / name).mkdir()
-        for name in ('app.py', 'media.py', 'settings.py', 'requirements.txt', 'test_app.py'):
+        for name in ('app.py', 'media.py', 'movie_paths.py', 'settings.py', 'requirements.txt', 'test_app.py', 'test_movie_paths.py'):
             shutil.copyfile(ROOT / 'backend' / name, self.repo / 'backend' / name)
         for name in ('package.json', 'package-lock.json', 'vite.config.js', 'eslint.config.js', 'index.html'):
             shutil.copyfile(ROOT / 'frontend' / name, self.repo / 'frontend' / name)

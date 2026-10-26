@@ -80,9 +80,16 @@ def normalize_items(items, roots):
             efficiency = size_mib / (seconds / 3600) if size_mib is not None and seconds else None
             interlaced = video.get('IsInterlaced')
             item_type = 'Movie' if item.get('Type') == 'Video' else item['Type']
+            production_year = number(item.get('ProductionYear'))
+            production_year = (
+                int(production_year)
+                if production_year is not None and production_year == int(production_year)
+                and 1000 <= production_year <= 9999 else None
+            )
             data.append({
                 'id': hashlib.sha256(repr(identity).encode()).hexdigest(),
                 'item_id': item_id, 'source_id': source_id, 'name': text(item.get('Name')),
+                'metadata_title': text(item.get('Name'), None), 'production_year': production_year,
                 'version_name': text(source.get('Name'), ''), 'type': item_type,
                 'series_name': text(item.get('SeriesName'), '') if item_type == 'Episode' else '',
                 'season_name': text(item.get('SeasonName'), '') if item_type == 'Episode' else '',

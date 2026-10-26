@@ -122,6 +122,7 @@ class APITests(unittest.TestCase):
             items = api.fetch_all_items(MagicMock(), time.monotonic() + 30)
             self.assertEqual(len(items), 501)
             self.assertEqual(fetch.call_args_list[1].args[1]['StartIndex'], 500)
+            self.assertEqual(fetch.call_args_list[0].args[1]['Fields'], 'MediaSources,MediaStreams,Path')
             self.assertNotIn('UserId', fetch.call_args_list[0].args[1])
         with patch.object(api, 'JELLYFIN_USER_ID', 'configured-user'), patch.object(api, 'jellyfin_get', return_value={'Items': []}) as fetch:
             api.fetch_all_items(MagicMock(), time.monotonic() + 30)
@@ -200,6 +201,42 @@ class APITests(unittest.TestCase):
         with patch.object(api, 'fetch_all_items') as fetch:
             self.assertEqual(self.client.get('/api/health').json, {'status': 'ok'})
             fetch.assert_not_called()
+
+    def test_movie_path_endpoint_uses_snapshot_metadata_without_refetching(self):
+        item = movie()
+        item.update(Name='The Matrix', ProductionYear=1999)
+        item['MediaSources'][0]['Path'] = '/media/movies/The Matrix (1999)/The Matrix (1999) - [1080p].mkv'
+        scan = self.scan([item])
+        self.assertEqual(scan.json[0]['production_year'], 1999)
+        self.assertEqual(scan.json[0]['metadata_title'], 'The Matrix')
+        with patch.object(api, 'fetch_all_items') as fetch:
+            result = self.client.get('/api/movie-paths?spelling_threshold=95')
+            fetch.assert_not_called()
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json['scanned_at'], scan.headers['X-Scanned-At'])
+        self.assertEqual(result.json['spelling_threshold'], 95)
+        self.assertEqual(result.json['summary']['checked'], 1)
+        self.assertEqual(result.json['summary']['needs_review'], 0)
+        self.assertEqual(result.json['rows'][0]['expected_component'], 'The Matrix (1999)')
+        self.assert_secret_absent(result)
+
+    def test_movie_path_endpoint_requires_snapshot_and_valid_threshold(self):
+        self.assertEqual(self.client.get('/api/movie-paths').status_code, 409)
+        for value in ['NaN', 'inf', '-1', '101', SECRET, '']:
+            with self.subTest(value=value):
+                result = self.client.get('/api/movie-paths', query_string={'spelling_threshold': value})
+                self.assertEqual(result.status_code, 400)
+                self.assert_secret_absent(result)
+
+    def test_old_cache_schema_requires_refresh_for_year_metadata(self):
+        self.scan()
+        snapshot = api.read_cache()
+        snapshot['version'] = 2
+        api.write_cache(snapshot)
+        self.assertEqual(self.client.get('/api/movie-paths').status_code, 409)
+
+    def test_movie_path_check_has_no_mutation_endpoint(self):
+        self.assertEqual(self.client.post('/api/movie-paths', json={'path': '/tmp/file', 'rename': 'new'}).status_code, 405)
 
     def test_refresh_failure_preserves_snapshot(self):
         expected = self.scan().json

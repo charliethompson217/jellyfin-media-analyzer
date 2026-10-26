@@ -37,6 +37,18 @@ Only recognized library paths become download links; filenames are URL-encoded, 
 
 An expired snapshot triggers a refresh. Other requests can use the last snapshot while that scan runs. A failed refresh preserves the snapshot and shows a safe warning. The UI displays the last successful scan time and skipped records. Unknown metadata remains unknown; unavailable size/runtime values do not participate in bitrate calculations. Each file/version is counted separately, and the storage-rate summary is the mean per file with known data.
 
+## Movie path checks
+
+Open **Movie Path Check**, then choose **Run Path Check**. This compares every movie file/version in the library snapshot against its Jellyfin title and production year. Overview filters do not limit the check, and TV episodes are excluded. The feature compares path names reported by Jellyfin; it does not inspect the host filesystem or rename files, so container/host path differences need no additional checker configuration.
+
+The checker groups results into exact, case/symbol, year, spelling, and possible-misidentification categories. Matching supports accent folding, Roman/Arabic numerals, `&`/`and`, colon subtitle variants, and misplaced edition/version tags. The spelling threshold defaults to 92% and can be changed before each run. A filename's trailing ` - [Version]` tag is ignored for title/year comparison.
+
+The overall category follows the **better-matching folder or filename**. A good folder can therefore give an overall exact match even when the filename is wrong; folder/file differences and version-tag problems remain independently flagged. Rows are grouped by category, with higher title similarity first within each group. **Only show issues** is selected initially; clear it to include clean matches.
+
+Use search, category, and flag filters to narrow the report. **View details** shows both component comparisons, year differences, matching variants, misplaced version tags, and the original Jellyfin path. **Export Path CSV** exports every filtered result across all pages, including detailed fields and spreadsheet-safe text. Missing titles, production years, or usable paths appear as **Not checked** with a reason rather than being classified as misidentified.
+
+Checks reuse the saved library snapshot and do not make additional Jellyfin requests. Reload the library when metadata changes, then rerun the check; existing reports show a notice when the library snapshot changes. This update adds production years to the snapshot schema, so older snapshots are automatically refreshed after deployment.
+
 ## Development
 
 From the repository root, create `.env` from `.env.example`, then load it into your shell with `set -a`, `source .env`, and `set +a`. For development, set a local writable `CACHE_FILE`, for example `/tmp/media-analyzer-dev/cache.json`. Alternatively use `backend/config.py` as described above.

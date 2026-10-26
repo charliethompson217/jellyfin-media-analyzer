@@ -4,12 +4,14 @@ import MediaTable from '../components/MediaTable';
 import Charts from '../components/Charts';
 import Filters from '../components/Filters';
 import StatsSummary from '../components/StatsSummary';
+import MoviePathCheck from '../components/MoviePathCheck';
 import { applyFilters } from '../utils/helpers';
 
 function MediaAnalyzer() {
   const { data, loading, error, snapshot, reload } = useMediaData();
   const [filters, setFilters] = useState({ search: '', supportedFormats: [], resolutionGroups: [], types: [], hiddenColumns: [] });
   const [chartMode, setChartMode] = useState('count'); // 'count', 'size', or 'duration'
+  const [view, setView] = useState('overview');
 
   const deferredSearch = useDeferredValue(filters.search);
   const effectiveFilters = useMemo(() => ({ ...filters, search: deferredSearch }), [filters, deferredSearch]);
@@ -35,56 +37,73 @@ function MediaAnalyzer() {
           {snapshot?.skipped > 0 && <p>{snapshot.skipped} records had no usable media sources and were skipped.</p>}
         </div>
         {error && <div role="alert" className="mb-6 p-4 border border-amber-300 rounded-md bg-amber-50 text-amber-900">{error}</div>}
-        <Filters filters={filters} setFilters={setFilters} data={data} />
-        <StatsSummary data={filteredData} />
+        <div role="tablist" aria-label="Media tools" className="flex gap-2 border-b border-gray-200 mb-6">
+          {[['overview', 'Library Overview'], ['paths', 'Movie Path Check']].map(([key, label]) => <button
+            key={key} id={`tab-${key}`} type="button" role="tab" aria-selected={view === key}
+            aria-controls={`panel-${key}`} tabIndex={view === key ? 0 : -1}
+            onClick={() => setView(key)} onKeyDown={event => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault();
+              const next = event.key === 'Home' ? 'overview' : event.key === 'End' ? 'paths' : view === 'overview' ? 'paths' : 'overview';
+              setView(next);
+              document.getElementById(`tab-${next}`).focus();
+            }} className={`px-4 py-3 border-b-2 font-medium ${view === key ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-600'}`}>{label}</button>)}
+        </div>
+        <div role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" hidden={view !== 'overview'}>
+          <Filters filters={filters} setFilters={setFilters} data={data} />
+          <StatsSummary data={filteredData} />
 
-        {/* Chart Mode Toggle */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
-          <div className="flex flex-wrap gap-3 items-center justify-between">
-            <span className="text-sm font-semibold text-gray-700">Chart Y-Axis</span>
-            <div className="inline-flex rounded-md shadow-sm" role="group">
-              <button
-                type="button"
-                onClick={() => setChartMode('count')}
-                aria-pressed={chartMode === 'count'}
-                className={`px-4 py-2 text-sm font-medium rounded-l-lg border transition-colors ${
-                  chartMode === 'count'
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                Number of Files
-              </button>
-              <button
-                type="button"
-                onClick={() => setChartMode('size')}
-                aria-pressed={chartMode === 'size'}
-                className={`px-4 py-2 text-sm font-medium border-t border-b border-r transition-colors ${
-                  chartMode === 'size'
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                Data Size
-              </button>
-              <button
-                type="button"
-                onClick={() => setChartMode('duration')}
-                aria-pressed={chartMode === 'duration'}
-                className={`px-4 py-2 text-sm font-medium rounded-r-lg border-t border-b border-r transition-colors ${
-                  chartMode === 'duration'
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                Video Duration
-              </button>
+          {/* Chart Mode Toggle */}
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
+            <div className="flex flex-wrap gap-3 items-center justify-between">
+              <span className="text-sm font-semibold text-gray-700">Chart Y-Axis</span>
+              <div className="inline-flex rounded-md shadow-sm" role="group">
+                <button
+                  type="button"
+                  onClick={() => setChartMode('count')}
+                  aria-pressed={chartMode === 'count'}
+                  className={`px-4 py-2 text-sm font-medium rounded-l-lg border transition-colors ${
+                    chartMode === 'count'
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  Number of Files
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChartMode('size')}
+                  aria-pressed={chartMode === 'size'}
+                  className={`px-4 py-2 text-sm font-medium border-t border-b border-r transition-colors ${
+                    chartMode === 'size'
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  Data Size
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChartMode('duration')}
+                  aria-pressed={chartMode === 'duration'}
+                  className={`px-4 py-2 text-sm font-medium rounded-r-lg border-t border-b border-r transition-colors ${
+                    chartMode === 'duration'
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  Video Duration
+                </button>
+              </div>
             </div>
           </div>
-        </div>
 
-        <Charts data={filteredData} mode={chartMode} />
-        <MediaTable data={filteredData} hiddenColumns={filters.hiddenColumns} />
+          <Charts data={filteredData} mode={chartMode} />
+          <MediaTable data={filteredData} hiddenColumns={filters.hiddenColumns} />
+        </div>
+        <div role="tabpanel" id="panel-paths" aria-labelledby="tab-paths" hidden={view !== 'paths'}>
+          <MoviePathCheck snapshot={snapshot} mediaLoading={loading} />
+        </div>
       </div>
     </div>
   );

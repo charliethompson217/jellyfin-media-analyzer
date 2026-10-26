@@ -139,7 +139,7 @@ as_builder() {
 }
 
 mkdir -p -- "${BACKEND_DIR}.releases" "${FRONTEND_DIR}.releases" "$BACKEND_RELEASE" "$FRONTEND_RELEASE" "$BUILD_DIR/frontend"
-cp -- "$REPO_DIR"/backend/{app.py,media.py,settings.py,requirements.txt,test_app.py} "$BACKEND_RELEASE/"
+cp -- "$REPO_DIR"/backend/{app.py,media.py,movie_paths.py,settings.py,requirements.txt,test_app.py,test_movie_paths.py} "$BACKEND_RELEASE/"
 cp -- "$REPO_DIR"/frontend/{package.json,package-lock.json,vite.config.js,eslint.config.js,index.html} "$BUILD_DIR/frontend/"
 cp -R -- "$REPO_DIR/frontend/src" "$BUILD_DIR/frontend/"
 chown -R "$BUILD_USER" -- "$BACKEND_RELEASE" "$BUILD_DIR"
